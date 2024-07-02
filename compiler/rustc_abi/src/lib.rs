@@ -1,7 +1,9 @@
-#![cfg_attr(feature = "nightly", feature(step_trait))]
+// tidy-alphabetical-start
 #![cfg_attr(feature = "nightly", allow(internal_features))]
 #![cfg_attr(feature = "nightly", doc(rust_logo))]
 #![cfg_attr(feature = "nightly", feature(rustdoc_internals))]
+#![cfg_attr(feature = "nightly", feature(step_trait))]
+// tidy-alphabetical-end
 
 use std::fmt;
 use std::num::{NonZeroUsize, ParseIntError};
@@ -137,23 +139,16 @@ impl ReprOptions {
         self.c() || self.int.is_some()
     }
 
-    /// Returns `true` if this `#[repr()]` should inhibit struct field reordering
-    /// optimizations, such as with `repr(C)`, `repr(packed(1))`, or `repr(<int>)`.
-    pub fn inhibit_struct_field_reordering_opt(&self) -> bool {
-        if let Some(pack) = self.pack {
-            if pack.bytes() == 1 {
-                return true;
-            }
-        }
-
+    /// Returns `true` if this `#[repr()]` guarantees a fixed field order,
+    /// e.g. `repr(C)` or `repr(<int>)`.
+    pub fn inhibit_struct_field_reordering(&self) -> bool {
         self.flags.intersects(ReprFlags::IS_UNOPTIMISABLE) || self.int.is_some()
     }
 
     /// Returns `true` if this type is valid for reordering and `-Z randomize-layout`
     /// was enabled for its declaration crate.
     pub fn can_randomize_type_layout(&self) -> bool {
-        !self.inhibit_struct_field_reordering_opt()
-            && self.flags.contains(ReprFlags::RANDOMIZE_LAYOUT)
+        !self.inhibit_struct_field_reordering() && self.flags.contains(ReprFlags::RANDOMIZE_LAYOUT)
     }
 
     /// Returns `true` if this `#[repr()]` should inhibit union ABI optimisations.
@@ -432,11 +427,13 @@ pub struct Size {
     raw: u64,
 }
 
-// Safety: Ord is implement as just comparing numerical values and numerical values
-// are not changed by (de-)serialization.
 #[cfg(feature = "nightly")]
-unsafe impl StableOrd for Size {
+impl StableOrd for Size {
     const CAN_USE_UNSTABLE_SORT: bool = true;
+
+    // `Ord` is implemented as just comparing numerical values and numerical values
+    // are not changed by (de-)serialization.
+    const THIS_IMPLEMENTATION_HAS_BEEN_TRIPLE_CHECKED: () = ();
 }
 
 // This is debug-printed a lot in larger structs, don't waste too much space there
@@ -926,6 +923,41 @@ impl Integer {
     }
 }
 
+/// Floating-point types.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[cfg_attr(feature = "nightly", derive(HashStable_Generic))]
+pub enum Float {
+    F16,
+    F32,
+    F64,
+    F128,
+}
+
+impl Float {
+    pub fn size(self) -> Size {
+        use Float::*;
+
+        match self {
+            F16 => Size::from_bits(16),
+            F32 => Size::from_bits(32),
+            F64 => Size::from_bits(64),
+            F128 => Size::from_bits(128),
+        }
+    }
+
+    pub fn align<C: HasDataLayout>(self, cx: &C) -> AbiAndPrefAlign {
+        use Float::*;
+        let dl = cx.data_layout();
+
+        match self {
+            F16 => dl.f16_align,
+            F32 => dl.f32_align,
+            F64 => dl.f64_align,
+            F128 => dl.f128_align,
+        }
+    }
+}
+
 /// Fundamental unit of memory access and layout.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 #[cfg_attr(feature = "nightly", derive(HashStable_Generic))]
@@ -938,10 +970,7 @@ pub enum Primitive {
     /// a negative integer passed by zero-extension will appear positive in
     /// the callee, and most operations on it will produce the wrong values.
     Int(Integer, bool),
-    F16,
-    F32,
-    F64,
-    F128,
+    Float(Float),
     Pointer(AddressSpace),
 }
 
@@ -952,10 +981,7 @@ impl Primitive {
 
         match self {
             Int(i, _) => i.size(),
-            F16 => Size::from_bits(16),
-            F32 => Size::from_bits(32),
-            F64 => Size::from_bits(64),
-            F128 => Size::from_bits(128),
+            Float(f) => f.size(),
             // FIXME(erikdesjardins): ignoring address space is technically wrong, pointers in
             // different address spaces can have different sizes
             // (but TargetDataLayout doesn't currently parse that part of the DL string)
@@ -969,10 +995,7 @@ impl Primitive {
 
         match self {
             Int(i, _) => i.align(dl),
-            F16 => dl.f16_align,
-            F32 => dl.f32_align,
-            F64 => dl.f64_align,
-            F128 => dl.f128_align,
+            Float(f) => f.align(dl),
             // FIXME(erikdesjardins): ignoring address space is technically wrong, pointers in
             // different address spaces can have different alignments
             // (but TargetDataLayout doesn't currently parse that part of the DL string)
@@ -1229,7 +1252,7 @@ impl<FieldIdx: Idx> FieldsShape<FieldIdx> {
 
     /// Gets source indices of the fields by increasing offsets.
     #[inline]
-    pub fn index_by_increasing_offset(&self) -> impl Iterator<Item = usize> + '_ {
+    pub fn index_by_increasing_offset(&self) -> impl ExactSizeIterator<Item = usize> + '_ {
         let mut inverse_small = [0u8; 64];
         let mut inverse_big = IndexVec::new();
         let use_small = self.count() <= inverse_small.len();
@@ -1245,7 +1268,12 @@ impl<FieldIdx: Idx> FieldsShape<FieldIdx> {
             }
         }
 
-        (0..self.count()).map(move |i| match *self {
+        // Primitives don't really have fields in the way that structs do,
+        // but having this return an empty iterator for them is unhelpful
+        // since that makes them look kinda like ZSTs, which they're not.
+        let pseudofield_count = if let FieldsShape::Primitive = self { 1 } else { self.count() };
+
+        (0..pseudofield_count).map(move |i| match *self {
             FieldsShape::Primitive | FieldsShape::Union(_) | FieldsShape::Array { .. } => i,
             FieldsShape::Arbitrary { .. } => {
                 if use_small {

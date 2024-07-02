@@ -254,7 +254,7 @@ pub(super) fn print_item(cx: &mut Context<'_>, item: &clean::Item, buf: &mut Buf
 
     match &*item.kind {
         clean::ModuleItem(ref m) => item_module(buf, cx, item, &m.items),
-        clean::FunctionItem(ref f) | clean::ForeignFunctionItem(ref f) => {
+        clean::FunctionItem(ref f) | clean::ForeignFunctionItem(ref f, _) => {
             item_function(buf, cx, item, f)
         }
         clean::TraitItem(ref t) => item_trait(buf, cx, item, t),
@@ -265,8 +265,9 @@ pub(super) fn print_item(cx: &mut Context<'_>, item: &clean::Item, buf: &mut Buf
         clean::MacroItem(ref m) => item_macro(buf, cx, item, m),
         clean::ProcMacroItem(ref m) => item_proc_macro(buf, cx, item, m),
         clean::PrimitiveItem(_) => item_primitive(buf, cx, item),
-        clean::StaticItem(ref i) | clean::ForeignStaticItem(ref i) => item_static(buf, cx, item, i),
-        clean::ConstantItem(ref c) => item_constant(buf, cx, item, c),
+        clean::StaticItem(ref i) => item_static(buf, cx, item, i, None),
+        clean::ForeignStaticItem(ref i, safety) => item_static(buf, cx, item, i, Some(*safety)),
+        clean::ConstantItem(generics, ty, c) => item_constant(buf, cx, item, generics, ty, c),
         clean::ForeignTypeItem => item_foreign_type(buf, cx, item),
         clean::KeywordItem => item_keyword(buf, cx, item),
         clean::OpaqueTyItem(ref e) => item_opaque_ty(buf, cx, item, e),
@@ -491,10 +492,13 @@ fn item_module(w: &mut Buffer, cx: &mut Context<'_>, item: &clean::Item, items: 
                 }
 
                 let unsafety_flag = match *myitem.kind {
-                    clean::FunctionItem(_) | clean::ForeignFunctionItem(_)
-                        if myitem.fn_header(tcx).unwrap().unsafety == hir::Unsafety::Unsafe =>
+                    clean::FunctionItem(_) | clean::ForeignFunctionItem(..)
+                        if myitem.fn_header(tcx).unwrap().safety == hir::Safety::Unsafe =>
                     {
                         "<sup title=\"unsafe function\">⚠</sup>"
+                    }
+                    clean::ForeignStaticItem(_, hir::Safety::Unsafe) => {
+                        "<sup title=\"unsafe static\">⚠</sup>"
                     }
                     _ => "",
                 };
@@ -615,8 +619,19 @@ fn extra_info_tags<'a, 'tcx: 'a>(
 fn item_function(w: &mut Buffer, cx: &mut Context<'_>, it: &clean::Item, f: &clean::Function) {
     let tcx = cx.tcx();
     let header = it.fn_header(tcx).expect("printing a function which isn't a function");
-    let constness = print_constness_with_space(&header.constness, it.const_stability(tcx));
-    let unsafety = header.unsafety.print_with_space();
+    debug!(
+        "item_function/const: {:?} {:?} {:?} {:?}",
+        it.name,
+        &header.constness,
+        it.stable_since(tcx),
+        it.const_stability(tcx),
+    );
+    let constness = print_constness_with_space(
+        &header.constness,
+        it.stable_since(tcx),
+        it.const_stability(tcx),
+    );
+    let safety = header.safety.print_with_space();
     let abi = print_abi_with_space(header.abi).to_string();
     let asyncness = header.asyncness.print_with_space();
     let visibility = visibility_print_with_space(it, cx).to_string();
@@ -627,7 +642,7 @@ fn item_function(w: &mut Buffer, cx: &mut Context<'_>, it: &clean::Item, f: &cle
         + visibility.len()
         + constness.len()
         + asyncness.len()
-        + unsafety.len()
+        + safety.len()
         + abi.len()
         + name.as_str().len()
         + generics_len;
@@ -638,13 +653,13 @@ fn item_function(w: &mut Buffer, cx: &mut Context<'_>, it: &clean::Item, f: &cle
         w.reserve(header_len);
         write!(
             w,
-            "{attrs}{vis}{constness}{asyncness}{unsafety}{abi}fn \
+            "{attrs}{vis}{constness}{asyncness}{safety}{abi}fn \
                 {name}{generics}{decl}{notable_traits}{where_clause}",
             attrs = render_attributes_in_pre(it, "", cx),
             vis = visibility,
             constness = constness,
             asyncness = asyncness,
-            unsafety = unsafety,
+            safety = safety,
             abi = abi,
             name = name,
             generics = f.generics.print(cx),
@@ -674,10 +689,10 @@ fn item_trait(w: &mut Buffer, cx: &mut Context<'_>, it: &clean::Item, t: &clean:
     wrap_item(w, |mut w| {
         write!(
             w,
-            "{attrs}{vis}{unsafety}{is_auto}trait {name}{generics}{bounds}",
+            "{attrs}{vis}{safety}{is_auto}trait {name}{generics}{bounds}",
             attrs = render_attributes_in_pre(it, "", cx),
             vis = visibility_print_with_space(it, cx),
-            unsafety = t.unsafety(tcx).print_with_space(),
+            safety = t.safety(tcx).print_with_space(),
             is_auto = if t.is_auto(tcx) { "auto " } else { "" },
             name = it.name.unwrap(),
             generics = t.generics.print(cx),
@@ -1833,7 +1848,14 @@ fn item_primitive(w: &mut impl fmt::Write, cx: &mut Context<'_>, it: &clean::Ite
     }
 }
 
-fn item_constant(w: &mut Buffer, cx: &mut Context<'_>, it: &clean::Item, c: &clean::Constant) {
+fn item_constant(
+    w: &mut Buffer,
+    cx: &mut Context<'_>,
+    it: &clean::Item,
+    generics: &clean::Generics,
+    ty: &clean::Type,
+    c: &clean::Constant,
+) {
     wrap_item(w, |w| {
         let tcx = cx.tcx();
         render_attributes_in_code(w, it, cx);
@@ -1843,9 +1865,9 @@ fn item_constant(w: &mut Buffer, cx: &mut Context<'_>, it: &clean::Item, c: &cle
             "{vis}const {name}{generics}: {typ}{where_clause}",
             vis = visibility_print_with_space(it, cx),
             name = it.name.unwrap(),
-            generics = c.generics.print(cx),
-            typ = c.type_.print(cx),
-            where_clause = print_where_clause(&c.generics, cx, 0, Ending::NoNewline),
+            generics = generics.print(cx),
+            typ = ty.print(cx),
+            where_clause = print_where_clause(&generics, cx, 0, Ending::NoNewline),
         );
 
         // FIXME: The code below now prints
@@ -1939,13 +1961,22 @@ fn item_fields(
     }
 }
 
-fn item_static(w: &mut impl fmt::Write, cx: &mut Context<'_>, it: &clean::Item, s: &clean::Static) {
+fn item_static(
+    w: &mut impl fmt::Write,
+    cx: &mut Context<'_>,
+    it: &clean::Item,
+    s: &clean::Static,
+    safety: Option<hir::Safety>,
+) {
     wrap_item(w, |buffer| {
         render_attributes_in_code(buffer, it, cx);
         write!(
             buffer,
-            "{vis}static {mutability}{name}: {typ}",
+            "{vis}{safe}static {mutability}{name}: {typ}",
             vis = visibility_print_with_space(it, cx),
+            safe = safety
+                .map(|safe| if safe == hir::Safety::Unsafe { "unsafe " } else { "" })
+                .unwrap_or(""),
             mutability = s.mutability.print_with_space(),
             name = it.name.unwrap(),
             typ = s.type_.print(cx)

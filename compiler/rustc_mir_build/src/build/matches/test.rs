@@ -13,10 +13,12 @@ use rustc_middle::mir::*;
 use rustc_middle::ty::util::IntTypeExt;
 use rustc_middle::ty::GenericArg;
 use rustc_middle::ty::{self, adjustment::PointerCoercion, Ty, TyCtxt};
+use rustc_middle::{bug, span_bug};
 use rustc_span::def_id::DefId;
 use rustc_span::source_map::Spanned;
 use rustc_span::symbol::{sym, Symbol};
 use rustc_span::{Span, DUMMY_SP};
+use tracing::{debug, instrument};
 
 use std::cmp::Ordering;
 
@@ -43,6 +45,8 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             }
 
             TestCase::Deref { temp, mutability } => TestKind::Deref { temp, mutability },
+
+            TestCase::Never => TestKind::Never,
 
             TestCase::Or { .. } => bug!("or-patterns should have already been handled"),
 
@@ -137,7 +141,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 let success_block = target_block(TestBranch::Success);
                 let fail_block = target_block(TestBranch::Failure);
                 if let ty::Adt(def, _) = ty.kind()
-                    && Some(def.did()) == tcx.lang_items().string()
+                    && tcx.is_lang_item(def.did(), LangItem::String)
                 {
                     if !tcx.features().string_deref_patterns {
                         bug!(
@@ -262,6 +266,20 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 let target = target_block(TestBranch::Success);
                 self.call_deref(block, target, place, mutability, ty, temp, test.span);
             }
+
+            TestKind::Never => {
+                // Check that the place is initialized.
+                // FIXME(never_patterns): Also assert validity of the data at `place`.
+                self.cfg.push_fake_read(
+                    block,
+                    source_info,
+                    FakeReadCause::ForMatchedPlace(None),
+                    place,
+                );
+                // A never pattern is only allowed on an uninhabited type, so validity of the data
+                // implies unreachability.
+                self.cfg.terminate(block, source_info, TerminatorKind::Unreachable);
+            }
         }
     }
 
@@ -306,7 +324,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     user_ty: None,
                     const_: method,
                 })),
-                args: vec![Spanned { node: Operand::Move(ref_src), span }],
+                args: [Spanned { node: Operand::Move(ref_src), span }].into(),
                 destination: temp,
                 target: Some(target_block),
                 unwind: UnwindAction::Continue,
@@ -468,10 +486,11 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
 
                     const_: method,
                 })),
-                args: vec![
+                args: [
                     Spanned { node: Operand::Copy(val), span: DUMMY_SP },
                     Spanned { node: expect, span: DUMMY_SP },
-                ],
+                ]
+                .into(),
                 destination: eq_result,
                 target: Some(eq_block),
                 unwind: UnwindAction::Continue,
@@ -706,6 +725,11 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             (TestKind::Deref { temp: test_temp, .. }, TestCase::Deref { temp, .. })
                 if test_temp == temp =>
             {
+                fully_matched = true;
+                Some(TestBranch::Success)
+            }
+
+            (TestKind::Never, _) => {
                 fully_matched = true;
                 Some(TestBranch::Success)
             }

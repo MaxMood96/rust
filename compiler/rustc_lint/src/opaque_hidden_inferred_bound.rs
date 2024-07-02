@@ -1,9 +1,8 @@
 use rustc_hir as hir;
 use rustc_infer::infer::TyCtxtInferExt;
 use rustc_macros::{LintDiagnostic, Subdiagnostic};
-use rustc_middle::ty::{
-    self, fold::BottomUpFolder, print::TraitPredPrintModifiersAndPath, Ty, TypeFoldable,
-};
+use rustc_middle::ty::print::{PrintTraitPredicateExt as _, TraitPredPrintModifiersAndPath};
+use rustc_middle::ty::{self, fold::BottomUpFolder, Ty, TypeFoldable};
 use rustc_session::{declare_lint, declare_lint_pass};
 use rustc_span::{symbol::kw, Span};
 use rustc_trait_selection::traits;
@@ -47,6 +46,8 @@ declare_lint! {
     /// fn test() -> impl Trait<Assoc = Tait> {
     ///     42
     /// }
+    ///
+    /// fn main() {}
     /// ```
     ///
     /// {{produces}}
@@ -84,7 +85,7 @@ impl<'tcx> LateLintPass<'tcx> for OpaqueHiddenInferredBound {
                 };
                 // Only check types, since those are the only things that may
                 // have opaques in them anyways.
-                let Some(proj_term) = proj.term.ty() else { return };
+                let Some(proj_term) = proj.term.as_type() else { return };
 
                 // HACK: `impl Trait<Assoc = impl Trait2>` from an RPIT is "ok"...
                 if let ty::Alias(ty::Opaque, opaque_ty) = *proj_term.kind()
@@ -108,8 +109,11 @@ impl<'tcx> LateLintPass<'tcx> for OpaqueHiddenInferredBound {
                     return;
                 }
 
-                let proj_ty =
-                    Ty::new_projection(cx.tcx, proj.projection_ty.def_id, proj.projection_ty.args);
+                let proj_ty = Ty::new_projection_from_args(
+                    cx.tcx,
+                    proj.projection_term.def_id,
+                    proj.projection_term.args,
+                );
                 // For every instance of the projection type in the bounds,
                 // replace them with the term we're assigning to the associated
                 // type in our opaque type.
@@ -124,8 +128,8 @@ impl<'tcx> LateLintPass<'tcx> for OpaqueHiddenInferredBound {
                 // with `impl Send: OtherTrait`.
                 for (assoc_pred, assoc_pred_span) in cx
                     .tcx
-                    .explicit_item_bounds(proj.projection_ty.def_id)
-                    .iter_instantiated_copied(cx.tcx, proj.projection_ty.args)
+                    .explicit_item_bounds(proj.projection_term.def_id)
+                    .iter_instantiated_copied(cx.tcx, proj.projection_term.args)
                 {
                     let assoc_pred = assoc_pred.fold_with(proj_replacer);
                     let Ok(assoc_pred) = traits::fully_normalize(

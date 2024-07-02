@@ -7,6 +7,7 @@ use crate::hint;
 use crate::intrinsics;
 use crate::mem;
 use crate::str::FromStr;
+use crate::ub_checks::assert_unsafe_precondition;
 
 // Used because the `?` operator is not allowed in a const context.
 macro_rules! try_opt {
@@ -482,7 +483,6 @@ impl u8 {
         Self = u8,
         ActualT = u8,
         SignedT = i8,
-        NonZeroT = NonZero<u8>,
         BITS = 8,
         MAX = 255,
         rot = 2,
@@ -1097,7 +1097,6 @@ impl u16 {
         Self = u16,
         ActualT = u16,
         SignedT = i16,
-        NonZeroT = NonZero<u16>,
         BITS = 16,
         MAX = 65535,
         rot = 4,
@@ -1146,7 +1145,6 @@ impl u32 {
         Self = u32,
         ActualT = u32,
         SignedT = i32,
-        NonZeroT = NonZero<u32>,
         BITS = 32,
         MAX = 4294967295,
         rot = 8,
@@ -1170,7 +1168,6 @@ impl u64 {
         Self = u64,
         ActualT = u64,
         SignedT = i64,
-        NonZeroT = NonZero<u64>,
         BITS = 64,
         MAX = 18446744073709551615,
         rot = 12,
@@ -1194,7 +1191,6 @@ impl u128 {
         Self = u128,
         ActualT = u128,
         SignedT = i128,
-        NonZeroT = NonZero<u128>,
         BITS = 128,
         MAX = 340282366920938463463374607431768211455,
         rot = 16,
@@ -1220,7 +1216,6 @@ impl usize {
         Self = usize,
         ActualT = u16,
         SignedT = isize,
-        NonZeroT = NonZero<usize>,
         BITS = 16,
         MAX = 65535,
         rot = 4,
@@ -1245,7 +1240,6 @@ impl usize {
         Self = usize,
         ActualT = u32,
         SignedT = isize,
-        NonZeroT = NonZero<usize>,
         BITS = 32,
         MAX = 4294967295,
         rot = 8,
@@ -1270,7 +1264,6 @@ impl usize {
         Self = usize,
         ActualT = u64,
         SignedT = isize,
-        NonZeroT = NonZero<usize>,
         BITS = 64,
         MAX = 18446744073709551615,
         rot = 12,
@@ -1412,11 +1405,9 @@ fn from_str_radix_panic_rt(radix: u32) -> ! {
 #[cfg_attr(feature = "panic_immediate_abort", inline)]
 #[cold]
 #[track_caller]
-const fn from_str_radix_assert(radix: u32) {
-    if 2 > radix || radix > 36 {
-        // The only difference between these two functions is their panic message.
-        intrinsics::const_eval_select((radix,), from_str_radix_panic_ct, from_str_radix_panic_rt);
-    }
+const fn from_str_radix_panic(radix: u32) {
+    // The only difference between these two functions is their panic message.
+    intrinsics::const_eval_select((radix,), from_str_radix_panic_ct, from_str_radix_panic_rt);
 }
 
 macro_rules! from_str_radix {
@@ -1450,7 +1441,9 @@ macro_rules! from_str_radix {
                 use self::IntErrorKind::*;
                 use self::ParseIntError as PIE;
 
-                from_str_radix_assert(radix);
+                if 2 > radix || radix > 36 {
+                    from_str_radix_panic(radix);
+                }
 
                 if src.is_empty() {
                     return Err(PIE { kind: Empty });

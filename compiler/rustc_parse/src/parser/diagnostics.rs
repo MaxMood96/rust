@@ -1,7 +1,6 @@
 use super::pat::Expected;
 use super::{
-    BlockMode, CommaRecoveryMode, Parser, PathStyle, Restrictions, SemiColonMode, SeqSep,
-    TokenExpectType, TokenType,
+    BlockMode, CommaRecoveryMode, Parser, PathStyle, Restrictions, SemiColonMode, SeqSep, TokenType,
 };
 use crate::errors::{
     AmbiguousPlus, AsyncMoveBlockIn2015, AttributeOnParamType, BadQPathStage2, BadTypePlus,
@@ -22,7 +21,6 @@ use crate::fluent_generated as fluent;
 use crate::parser;
 use crate::parser::attr::InnerAttrPolicy;
 use ast::token::IdentIsRaw;
-use parser::Recovered;
 use rustc_ast as ast;
 use rustc_ast::ptr::P;
 use rustc_ast::token::{self, Delimiter, Lit, LitKind, Token, TokenKind};
@@ -31,12 +29,12 @@ use rustc_ast::util::parser::AssocOp;
 use rustc_ast::{
     AngleBracketedArg, AngleBracketedArgs, AnonConst, AttrVec, BinOpKind, BindingMode, Block,
     BlockCheckMode, Expr, ExprKind, GenericArg, Generics, HasTokens, Item, ItemKind, Param, Pat,
-    PatKind, Path, PathSegment, QSelf, Ty, TyKind,
+    PatKind, Path, PathSegment, QSelf, Recovered, Ty, TyKind,
 };
 use rustc_ast_pretty::pprust;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_errors::{
-    pluralize, Applicability, Diag, DiagCtxt, ErrorGuaranteed, FatalError, PErr, PResult,
+    pluralize, Applicability, Diag, DiagCtxtHandle, ErrorGuaranteed, FatalError, PErr, PResult,
     Subdiagnostic,
 };
 use rustc_session::errors::ExprParenthesesNeeded;
@@ -46,6 +44,7 @@ use rustc_span::{BytePos, Span, SpanSnippetError, Symbol, DUMMY_SP};
 use std::mem::take;
 use std::ops::{Deref, DerefMut};
 use thin_vec::{thin_vec, ThinVec};
+use tracing::{debug, trace};
 
 /// Creates a placeholder argument.
 pub(super) fn dummy_arg(ident: Ident, guar: ErrorGuaranteed) -> Param {
@@ -130,14 +129,14 @@ pub enum AttemptLocalParseRecovery {
 }
 
 impl AttemptLocalParseRecovery {
-    pub fn yes(&self) -> bool {
+    pub(super) fn yes(&self) -> bool {
         match self {
             AttemptLocalParseRecovery::Yes => true,
             AttemptLocalParseRecovery::No => false,
         }
     }
 
-    pub fn no(&self) -> bool {
+    pub(super) fn no(&self) -> bool {
         match self {
             AttemptLocalParseRecovery::Yes => false,
             AttemptLocalParseRecovery::No => true,
@@ -241,8 +240,8 @@ impl<'a> DerefMut for SnapshotParser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    pub fn dcx(&self) -> &'a DiagCtxt {
-        &self.psess.dcx
+    pub fn dcx(&self) -> DiagCtxtHandle<'a> {
+        self.psess.dcx()
     }
 
     /// Replace `self` with `snapshot.parser`.
@@ -527,14 +526,14 @@ impl<'a> Parser<'a> {
                 //
                 //   let x = 32:
                 //   let y = 42;
-                self.dcx().emit_err(ExpectedSemi {
+                let guar = self.dcx().emit_err(ExpectedSemi {
                     span: self.token.span,
                     token: self.token.clone(),
                     unexpected_token_label: None,
                     sugg: ExpectedSemiSugg::ChangeToSemi(self.token.span),
                 });
                 self.bump();
-                return Ok(Recovered::Yes);
+                return Ok(Recovered::Yes(guar));
             } else if self.look_ahead(0, |t| {
                 t == &token::CloseDelim(Delimiter::Brace)
                     || ((t.can_begin_expr() || t.can_begin_item())
@@ -552,13 +551,13 @@ impl<'a> Parser<'a> {
                 //   let x = 32
                 //   let y = 42;
                 let span = self.prev_token.span.shrink_to_hi();
-                self.dcx().emit_err(ExpectedSemi {
+                let guar = self.dcx().emit_err(ExpectedSemi {
                     span,
                     token: self.token.clone(),
                     unexpected_token_label: Some(self.token.span),
                     sugg: ExpectedSemiSugg::AddSemi(span),
                 });
-                return Ok(Recovered::Yes);
+                return Ok(Recovered::Yes(guar));
             }
         }
 
@@ -667,7 +666,7 @@ impl<'a> Parser<'a> {
         {
             err.note("you may be trying to write a c-string literal");
             err.note("c-string literals require Rust 2021 or later");
-            err.subdiagnostic(self.dcx(), HelpUseLatestEdition::new());
+            err.subdiagnostic(HelpUseLatestEdition::new());
         }
 
         // `pub` may be used for an item or `pub(crate)`
@@ -712,8 +711,8 @@ impl<'a> Parser<'a> {
 
         if self.check_too_many_raw_str_terminators(&mut err) {
             if expected.contains(&TokenType::Token(token::Semi)) && self.eat(&token::Semi) {
-                err.emit();
-                return Ok(Recovered::Yes);
+                let guar = err.emit();
+                return Ok(Recovered::Yes(guar));
             } else {
                 return Err(err);
             }
@@ -891,7 +890,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn maybe_suggest_struct_literal(
+    pub(super) fn maybe_suggest_struct_literal(
         &mut self,
         lo: Span,
         s: BlockCheckMode,
@@ -1045,9 +1044,7 @@ impl<'a> Parser<'a> {
     /// passes through any errors encountered. Used for error recovery.
     pub(super) fn eat_to_tokens(&mut self, kets: &[&TokenKind]) {
         if let Err(err) =
-            self.parse_seq_to_before_tokens(kets, SeqSep::none(), TokenExpectType::Expect, |p| {
-                Ok(p.parse_token_tree())
-            })
+            self.parse_seq_to_before_tokens(kets, &[], SeqSep::none(), |p| Ok(p.parse_token_tree()))
         {
             err.cancel();
         }
@@ -1224,7 +1221,11 @@ impl<'a> Parser<'a> {
             let x = self.parse_seq_to_before_end(
                 &token::Gt,
                 SeqSep::trailing_allowed(token::Comma),
-                |p| p.parse_generic_arg(None),
+                |p| match p.parse_generic_arg(None)? {
+                    Some(arg) => Ok(arg),
+                    // If we didn't eat a generic arg, then we should error.
+                    None => p.unexpected_any(),
+                },
             );
             match x {
                 Ok((_, _, Recovered::No)) => {
@@ -1251,7 +1252,7 @@ impl<'a> Parser<'a> {
                         }
                     }
                 }
-                Ok((_, _, Recovered::Yes)) => {}
+                Ok((_, _, Recovered::Yes(_))) => {}
                 Err(err) => {
                     err.cancel();
                 }
@@ -1284,13 +1285,13 @@ impl<'a> Parser<'a> {
 
     /// Check to see if a pair of chained operators looks like an attempt at chained comparison,
     /// e.g. `1 < x <= 3`. If so, suggest either splitting the comparison into two, or
-    /// parenthesising the leftmost comparison.
+    /// parenthesising the leftmost comparison. The return value indicates if recovery happened.
     fn attempt_chained_comparison_suggestion(
         &mut self,
         err: &mut ComparisonOperatorsCannotBeChained,
         inner_op: &Expr,
         outer_op: &Spanned<AssocOp>,
-    ) -> Recovered {
+    ) -> bool {
         if let ExprKind::Binary(op, l1, r1) = &inner_op.kind {
             if let ExprKind::Field(_, ident) = l1.kind
                 && ident.as_str().parse::<i32>().is_err()
@@ -1298,7 +1299,7 @@ impl<'a> Parser<'a> {
             {
                 // The parser has encountered `foo.bar<baz`, the likelihood of the turbofish
                 // suggestion being the only one to apply is high.
-                return Recovered::No;
+                return false;
             }
             return match (op.node, &outer_op.node) {
                 // `x == y == z`
@@ -1317,7 +1318,7 @@ impl<'a> Parser<'a> {
                         span: inner_op.span.shrink_to_hi(),
                         middle_term: expr_to_str(r1),
                     });
-                    Recovered::No // Keep the current parse behavior, where the AST is `(x < y) < z`.
+                    false // Keep the current parse behavior, where the AST is `(x < y) < z`.
                 }
                 // `x == y < z`
                 (BinOpKind::Eq, AssocOp::Less | AssocOp::LessEqual | AssocOp::Greater | AssocOp::GreaterEqual) => {
@@ -1331,12 +1332,12 @@ impl<'a> Parser<'a> {
                                 left: r1.span.shrink_to_lo(),
                                 right: r2.span.shrink_to_hi(),
                             });
-                            Recovered::Yes
+                            true
                         }
                         Err(expr_err) => {
                             expr_err.cancel();
                             self.restore_snapshot(snapshot);
-                            Recovered::Yes
+                            true
                         }
                     }
                 }
@@ -1351,19 +1352,19 @@ impl<'a> Parser<'a> {
                                 left: l1.span.shrink_to_lo(),
                                 right: r1.span.shrink_to_hi(),
                             });
-                            Recovered::Yes
+                            true
                         }
                         Err(expr_err) => {
                             expr_err.cancel();
                             self.restore_snapshot(snapshot);
-                            Recovered::No
+                            false
                         }
                     }
                 }
-                _ => Recovered::No,
+                _ => false
             };
         }
-        Recovered::No
+        false
     }
 
     /// Produces an error if comparison operators are chained (RFC #558).
@@ -1494,7 +1495,7 @@ impl<'a> Parser<'a> {
                         // misformatted turbofish, for instance), suggest a correct form.
                         let recovered = self
                             .attempt_chained_comparison_suggestion(&mut err, inner_op, outer_op);
-                        if matches!(recovered, Recovered::Yes) {
+                        if recovered {
                             let guar = self.dcx().emit_err(err);
                             mk_err_expr(self, inner_op.span.to(self.prev_token.span), guar)
                         } else {
@@ -1503,10 +1504,10 @@ impl<'a> Parser<'a> {
                         }
                     };
                 }
-                let recover =
+                let recovered =
                     self.attempt_chained_comparison_suggestion(&mut err, inner_op, outer_op);
                 let guar = self.dcx().emit_err(err);
-                if matches!(recover, Recovered::Yes) {
+                if recovered {
                     return mk_err_expr(self, inner_op.span.to(self.prev_token.span), guar);
                 }
             }
@@ -1814,34 +1815,31 @@ impl<'a> Parser<'a> {
         Ok(P(T::recovered(Some(P(QSelf { ty, path_span, position: 0 })), path)))
     }
 
-    pub fn maybe_consume_incorrect_semicolon(&mut self, items: &[P<Item>]) -> bool {
-        if self.token.kind == TokenKind::Semi {
-            self.bump();
+    /// This function gets called in places where a semicolon is NOT expected and if there's a
+    /// semicolon it emits the appropriate error and returns true.
+    pub fn maybe_consume_incorrect_semicolon(&mut self, previous_item: Option<&Item>) -> bool {
+        if self.token.kind != TokenKind::Semi {
+            return false;
+        }
 
-            let mut err =
-                IncorrectSemicolon { span: self.prev_token.span, opt_help: None, name: "" };
-
-            if !items.is_empty() {
-                let previous_item = &items[items.len() - 1];
-                let previous_item_kind_name = match previous_item.kind {
+        // Check previous item to add it to the diagnostic, for example to say
+        // `enum declarations are not followed by a semicolon`
+        let err = match previous_item {
+            Some(previous_item) => {
+                let name = match previous_item.kind {
                     // Say "braced struct" because tuple-structs and
                     // braceless-empty-struct declarations do take a semicolon.
-                    ItemKind::Struct(..) => Some("braced struct"),
-                    ItemKind::Enum(..) => Some("enum"),
-                    ItemKind::Trait(..) => Some("trait"),
-                    ItemKind::Union(..) => Some("union"),
-                    _ => None,
+                    ItemKind::Struct(..) => "braced struct",
+                    _ => previous_item.kind.descr(),
                 };
-                if let Some(name) = previous_item_kind_name {
-                    err.opt_help = Some(());
-                    err.name = name;
-                }
+                IncorrectSemicolon { span: self.token.span, name, show_help: true }
             }
-            self.dcx().emit_err(err);
-            true
-        } else {
-            false
-        }
+            None => IncorrectSemicolon { span: self.token.span, name: "", show_help: false },
+        };
+        self.dcx().emit_err(err);
+
+        self.bump();
+        true
     }
 
     /// Creates a `Diag` for an unexpected token `t` and tries to recover if it is a
@@ -2359,7 +2357,7 @@ impl<'a> Parser<'a> {
         let mut err = self.dcx().struct_span_err(span, msg);
         let sp = self.psess.source_map().start_point(self.token.span);
         if let Some(sp) = self.psess.ambiguous_block_expr_parse.borrow().get(&sp) {
-            err.subdiagnostic(self.dcx(), ExprParenthesesNeeded::surrounding(*sp));
+            err.subdiagnostic(ExprParenthesesNeeded::surrounding(*sp));
         }
         err.span_label(span, "expected expression");
 
@@ -2369,9 +2367,9 @@ impl<'a> Parser<'a> {
         // in a subsequent macro invocation (#71039).
         let mut tok = self.token.clone();
         let mut labels = vec![];
-        while let TokenKind::Interpolated(node) = &tok.kind {
-            let tokens = node.0.tokens();
-            labels.push(node.clone());
+        while let TokenKind::Interpolated(nt) = &tok.kind {
+            let tokens = nt.tokens();
+            labels.push(nt.clone());
             if let Some(tokens) = tokens
                 && let tokens = tokens.to_attr_token_stream()
                 && let tokens = tokens.0.deref()
@@ -2384,27 +2382,20 @@ impl<'a> Parser<'a> {
         }
         let mut iter = labels.into_iter().peekable();
         let mut show_link = false;
-        while let Some(node) = iter.next() {
-            let descr = node.0.descr();
+        while let Some(nt) = iter.next() {
+            let descr = nt.descr();
             if let Some(next) = iter.peek() {
-                let next_descr = next.0.descr();
+                let next_descr = next.descr();
                 if next_descr != descr {
-                    err.span_label(next.1, format!("this macro fragment matcher is {next_descr}"));
-                    err.span_label(node.1, format!("this macro fragment matcher is {descr}"));
+                    err.span_label(next.use_span(), format!("this is expected to be {next_descr}"));
                     err.span_label(
-                        next.0.use_span(),
-                        format!("this is expected to be {next_descr}"),
-                    );
-                    err.span_label(
-                        node.0.use_span(),
+                        nt.use_span(),
                         format!(
                             "this is interpreted as {}, but it is expected to be {}",
                             next_descr, descr,
                         ),
                     );
                     show_link = true;
-                } else {
-                    err.span_label(node.1, "");
                 }
             }
         }
@@ -2465,7 +2456,7 @@ impl<'a> Parser<'a> {
     /// Handle encountering a symbol in a generic argument list that is not a `,` or `>`. In this
     /// case, we emit an error and try to suggest enclosing a const argument in braces if it looks
     /// like the user has forgotten them.
-    pub fn handle_ambiguous_unbraced_const_arg(
+    pub(super) fn handle_ambiguous_unbraced_const_arg(
         &mut self,
         args: &mut ThinVec<AngleBracketedArg>,
     ) -> PResult<'a, bool> {
@@ -2506,9 +2497,10 @@ impl<'a> Parser<'a> {
     /// - Single-segment paths (i.e. standalone generic const parameters).
     /// All other expressions that can be parsed will emit an error suggesting the expression be
     /// wrapped in braces.
-    pub fn handle_unambiguous_unbraced_const_arg(&mut self) -> PResult<'a, P<Expr>> {
+    pub(super) fn handle_unambiguous_unbraced_const_arg(&mut self) -> PResult<'a, P<Expr>> {
         let start = self.token.span;
-        let expr = self.parse_expr_res(Restrictions::CONST_EXPR, None).map_err(|mut err| {
+        let attrs = self.parse_outer_attributes()?;
+        let expr = self.parse_expr_res(Restrictions::CONST_EXPR, attrs).map_err(|mut err| {
             err.span_label(
                 start.shrink_to_lo(),
                 "while parsing a const generic argument starting here",
@@ -2565,7 +2557,7 @@ impl<'a> Parser<'a> {
         Some(GenericArg::Const(AnonConst { id: ast::DUMMY_NODE_ID, value }))
     }
 
-    pub fn recover_const_param_declaration(
+    pub(super) fn recover_const_param_declaration(
         &mut self,
         ty_generics: Option<&Generics>,
     ) -> PResult<'a, Option<GenericArg>> {
@@ -2595,7 +2587,11 @@ impl<'a> Parser<'a> {
     /// When encountering code like `foo::< bar + 3 >` or `foo::< bar - baz >` we suggest
     /// `foo::<{ bar + 3 }>` and `foo::<{ bar - baz }>`, respectively. We only provide a suggestion
     /// if we think that the resulting expression would be well formed.
-    pub fn recover_const_arg(&mut self, start: Span, mut err: Diag<'a>) -> PResult<'a, GenericArg> {
+    pub(super) fn recover_const_arg(
+        &mut self,
+        start: Span,
+        mut err: Diag<'a>,
+    ) -> PResult<'a, GenericArg> {
         let is_op_or_dot = AssocOp::from_token(&self.token)
             .and_then(|op| {
                 if let AssocOp::Greater
@@ -2626,7 +2622,10 @@ impl<'a> Parser<'a> {
         if is_op_or_dot {
             self.bump();
         }
-        match self.parse_expr_res(Restrictions::CONST_EXPR, None) {
+        match (|| {
+            let attrs = self.parse_outer_attributes()?;
+            self.parse_expr_res(Restrictions::CONST_EXPR, attrs)
+        })() {
             Ok(expr) => {
                 // Find a mistake like `MyTrait<Assoc == S::Assoc>`.
                 if token::EqEq == snapshot.token.kind {
@@ -2680,7 +2679,10 @@ impl<'a> Parser<'a> {
         &mut self,
         mut snapshot: SnapshotParser<'a>,
     ) -> Option<P<ast::Expr>> {
-        match snapshot.parse_expr_res(Restrictions::CONST_EXPR, None) {
+        match (|| {
+            let attrs = self.parse_outer_attributes()?;
+            snapshot.parse_expr_res(Restrictions::CONST_EXPR, attrs)
+        })() {
             // Since we don't know the exact reason why we failed to parse the type or the
             // expression, employ a simple heuristic to weed out some pathological cases.
             Ok(expr) if let token::Comma | token::Gt = snapshot.token.kind => {
@@ -2696,7 +2698,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Creates a dummy const argument, and reports that the expression must be enclosed in braces
-    pub fn dummy_const_arg_needs_braces(&self, mut err: Diag<'a>, span: Span) -> GenericArg {
+    pub(super) fn dummy_const_arg_needs_braces(&self, mut err: Diag<'a>, span: Span) -> GenericArg {
         err.multipart_suggestion(
             "expressions must be enclosed in braces to be used as const generic \
              arguments",
@@ -2961,13 +2963,24 @@ impl<'a> Parser<'a> {
         err
     }
 
-    pub fn is_diff_marker(&mut self, long_kind: &TokenKind, short_kind: &TokenKind) -> bool {
+    /// This checks if this is a conflict marker, depending of the parameter passed.
+    ///
+    /// * `<<<<<<<`
+    /// * `|||||||`
+    /// * `=======`
+    /// * `>>>>>>>`
+    ///
+    pub(super) fn is_vcs_conflict_marker(
+        &mut self,
+        long_kind: &TokenKind,
+        short_kind: &TokenKind,
+    ) -> bool {
         (0..3).all(|i| self.look_ahead(i, |tok| tok == long_kind))
             && self.look_ahead(3, |tok| tok == short_kind)
     }
 
-    fn diff_marker(&mut self, long_kind: &TokenKind, short_kind: &TokenKind) -> Option<Span> {
-        if self.is_diff_marker(long_kind, short_kind) {
+    fn conflict_marker(&mut self, long_kind: &TokenKind, short_kind: &TokenKind) -> Option<Span> {
+        if self.is_vcs_conflict_marker(long_kind, short_kind) {
             let lo = self.token.span;
             for _ in 0..4 {
                 self.bump();
@@ -2977,62 +2990,90 @@ impl<'a> Parser<'a> {
         None
     }
 
-    pub fn recover_diff_marker(&mut self) {
-        if let Err(err) = self.err_diff_marker() {
+    pub(super) fn recover_vcs_conflict_marker(&mut self) {
+        if let Err(err) = self.err_vcs_conflict_marker() {
             err.emit();
             FatalError.raise();
         }
     }
 
-    pub fn err_diff_marker(&mut self) -> PResult<'a, ()> {
-        let Some(start) = self.diff_marker(&TokenKind::BinOp(token::Shl), &TokenKind::Lt) else {
+    pub(crate) fn err_vcs_conflict_marker(&mut self) -> PResult<'a, ()> {
+        // <<<<<<<
+        let Some(start) = self.conflict_marker(&TokenKind::BinOp(token::Shl), &TokenKind::Lt)
+        else {
             return Ok(());
         };
         let mut spans = Vec::with_capacity(3);
         spans.push(start);
+        // |||||||
         let mut middlediff3 = None;
+        // =======
         let mut middle = None;
+        // >>>>>>>
         let mut end = None;
         loop {
             if self.token.kind == TokenKind::Eof {
                 break;
             }
-            if let Some(span) = self.diff_marker(&TokenKind::OrOr, &TokenKind::BinOp(token::Or)) {
+            if let Some(span) = self.conflict_marker(&TokenKind::OrOr, &TokenKind::BinOp(token::Or))
+            {
                 middlediff3 = Some(span);
             }
-            if let Some(span) = self.diff_marker(&TokenKind::EqEq, &TokenKind::Eq) {
+            if let Some(span) = self.conflict_marker(&TokenKind::EqEq, &TokenKind::Eq) {
                 middle = Some(span);
             }
-            if let Some(span) = self.diff_marker(&TokenKind::BinOp(token::Shr), &TokenKind::Gt) {
+            if let Some(span) = self.conflict_marker(&TokenKind::BinOp(token::Shr), &TokenKind::Gt)
+            {
                 spans.push(span);
                 end = Some(span);
                 break;
             }
             self.bump();
         }
+
         let mut err = self.dcx().struct_span_err(spans, "encountered diff marker");
-        err.span_label(start, "after this is the code before the merge");
-        if let Some(middle) = middlediff3 {
-            err.span_label(middle, "");
-        }
+        match middlediff3 {
+            // We're using diff3
+            Some(middlediff3) => {
+                err.span_label(
+                    start,
+                    "between this marker and `|||||||` is the code that we're merging into",
+                );
+                err.span_label(middlediff3, "between this marker and `=======` is the base code (what the two refs diverged from)");
+            }
+            None => {
+                err.span_label(
+                    start,
+                    "between this marker and `=======` is the code that we're merging into",
+                );
+            }
+        };
+
         if let Some(middle) = middle {
-            err.span_label(middle, "");
+            err.span_label(middle, "between this marker and `>>>>>>>` is the incoming code");
         }
         if let Some(end) = end {
-            err.span_label(end, "above this are the incoming code changes");
+            err.span_label(end, "this marker concludes the conflict region");
         }
-        err.help(
-            "if you're having merge conflicts after pulling new code, the top section is the code \
-             you already had and the bottom section is the remote code",
-        );
-        err.help(
-            "if you're in the middle of a rebase, the top section is the code being rebased onto \
-             and the bottom section is the code coming from the current commit being rebased",
-        );
         err.note(
-            "for an explanation on these markers from the `git` documentation, visit \
-             <https://git-scm.com/book/en/v2/Git-Tools-Advanced-Merging#_checking_out_conflicts>",
+            "conflict markers indicate that a merge was started but could not be completed due \
+             to merge conflicts\n\
+             to resolve a conflict, keep only the code you want and then delete the lines \
+             containing conflict markers",
         );
+        err.help(
+            "if you're having merge conflicts after pulling new code:\n\
+             the top section is the code you already had and the bottom section is the remote code\n\
+             if you're in the middle of a rebase:\n\
+             the top section is the code being rebased onto and the bottom section is the code \
+             coming from the current commit being rebased",
+        );
+
+        err.note(
+            "for an explanation on these markers from the `git` documentation:\n\
+             visit <https://git-scm.com/book/en/v2/Git-Tools-Advanced-Merging#_checking_out_conflicts>",
+        );
+
         Err(err)
     }
 

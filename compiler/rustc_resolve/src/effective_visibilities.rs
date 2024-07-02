@@ -11,6 +11,7 @@ use rustc_middle::middle::privacy::Level;
 use rustc_middle::middle::privacy::{EffectiveVisibilities, EffectiveVisibility};
 use rustc_middle::ty::Visibility;
 use std::mem;
+use tracing::info;
 
 #[derive(Clone, Copy)]
 enum ParentId<'a> {
@@ -98,7 +99,7 @@ impl<'r, 'a, 'tcx> EffectiveVisibilitiesVisitor<'r, 'a, 'tcx> {
         // is the maximum value among visibilities of bindings corresponding to that def id.
         for (binding, eff_vis) in visitor.import_effective_visibilities.iter() {
             let NameBindingKind::Import { import, .. } = binding.kind else { unreachable!() };
-            if !binding.is_ambiguity() {
+            if !binding.is_ambiguity_recursive() {
                 if let Some(node_id) = import.id() {
                     r.effective_visibilities.update_eff_vis(r.local_def_id(node_id), eff_vis, r.tcx)
                 }
@@ -236,7 +237,7 @@ impl<'r, 'ast, 'tcx> Visitor<'ast> for EffectiveVisibilitiesVisitor<'ast, 'r, 't
             ast::ItemKind::Impl(..) => return,
 
             // Should be unreachable at this stage
-            ast::ItemKind::MacCall(..) => panic!(
+            ast::ItemKind::MacCall(..) | ast::ItemKind::DelegationMac(..) => panic!(
                 "ast::ItemKind::MacCall encountered, this should not anymore appear at this stage"
             ),
 

@@ -42,10 +42,7 @@ fn constness(tcx: TyCtxt<'_>, def_id: LocalDefId) -> hir::Constness {
         | hir::Node::ImplItem(hir::ImplItem { kind: hir::ImplItemKind::Const(..), .. }) => {
             hir::Constness::Const
         }
-        hir::Node::Item(hir::Item { kind: hir::ItemKind::Impl(_), .. }) => tcx
-            .generics_of(def_id)
-            .host_effect_index
-            .map_or(hir::Constness::NotConst, |_| hir::Constness::Const),
+        hir::Node::Item(hir::Item { kind: hir::ItemKind::Impl(impl_), .. }) => impl_.constness,
         hir::Node::ForeignItem(hir::ForeignItem { kind: hir::ForeignItemKind::Fn(..), .. }) => {
             // Intrinsics use `rustc_const_{un,}stable` attributes to indicate constness. All other
             // foreign items cannot be evaluated at compile-time.
@@ -81,8 +78,8 @@ fn is_promotable_const_fn(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
                 if cfg!(debug_assertions) && stab.promotable {
                     let sig = tcx.fn_sig(def_id);
                     assert_eq!(
-                        sig.skip_binder().unsafety(),
-                        hir::Unsafety::Normal,
+                        sig.skip_binder().safety(),
+                        hir::Safety::Safe,
                         "don't mark const unsafe fns as promotable",
                         // https://github.com/rust-lang/rust/pull/53851#issuecomment-418760682
                     );

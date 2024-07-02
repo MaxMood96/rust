@@ -29,6 +29,7 @@ mod wasm;
 mod x86;
 mod x86_64;
 mod x86_win64;
+mod xtensa;
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, HashStable_Generic)]
 pub enum PassMode {
@@ -443,7 +444,7 @@ impl<'a, Ty> TyAndLayout<'a, Ty> {
             Abi::Scalar(scalar) => {
                 let kind = match scalar.primitive() {
                     abi::Int(..) | abi::Pointer(_) => RegKind::Integer,
-                    abi::F16 | abi::F32 | abi::F64 | abi::F128 => RegKind::Float,
+                    abi::Float(_) => RegKind::Float,
                 };
                 Ok(HomogeneousAggregate::Homogeneous(Reg { kind, size: self.size }))
             }
@@ -779,16 +780,21 @@ impl RiscvInterruptKind {
 /// Metadata describing how the arguments to a native function
 /// should be passed in order to respect the native ABI.
 ///
+/// The signature represented by this type may not match the MIR function signature.
+/// Certain attributes, like `#[track_caller]` can introduce additional arguments, which are present in [`FnAbi`], but not in `FnSig`.
+/// While this difference is rarely relevant, it should still be kept in mind.
+///
 /// I will do my best to describe this structure, but these
 /// comments are reverse-engineered and may be inaccurate. -NDM
 #[derive(Clone, PartialEq, Eq, Hash, HashStable_Generic)]
 pub struct FnAbi<'a, Ty> {
-    /// The LLVM types of each argument.
+    /// The type, layout, and information about how each argument is passed.
     pub args: Box<[ArgAbi<'a, Ty>]>,
 
-    /// LLVM return type.
+    /// The layout, type, and the way a value is returned from this function.
     pub ret: ArgAbi<'a, Ty>,
 
+    /// Marks this function as variadic (accepting a variable number of arguments).
     pub c_variadic: bool,
 
     /// The count of non-variadic arguments.
@@ -796,9 +802,9 @@ pub struct FnAbi<'a, Ty> {
     /// Should only be different from args.len() when c_variadic is true.
     /// This can be used to know whether an argument is variadic or not.
     pub fixed_count: u32,
-
+    /// The calling convention of this function.
     pub conv: Conv,
-
+    /// Indicates if an unwind may happen across a call to this function.
     pub can_unwind: bool,
 }
 
@@ -898,6 +904,7 @@ impl<'a, Ty> FnAbi<'a, Ty> {
                 }
             }
             "hexagon" => hexagon::compute_abi_info(self),
+            "xtensa" => xtensa::compute_abi_info(cx, self),
             "riscv32" | "riscv64" => riscv::compute_abi_info(cx, self),
             "wasm32" | "wasm64" => {
                 if cx.target_spec().adjust_abi(cx, abi, self.c_variadic) == spec::abi::Abi::Wasm {

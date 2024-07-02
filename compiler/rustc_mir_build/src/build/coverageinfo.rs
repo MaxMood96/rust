@@ -1,16 +1,17 @@
-mod mcdc;
 use std::assert_matches::assert_matches;
 use std::collections::hash_map::Entry;
 
 use rustc_data_structures::fx::FxHashMap;
 use rustc_middle::mir::coverage::{BlockMarkerId, BranchSpan, CoverageKind};
 use rustc_middle::mir::{self, BasicBlock, SourceInfo, UnOp};
-use rustc_middle::thir::{ExprId, ExprKind, Thir};
+use rustc_middle::thir::{ExprId, ExprKind, Pat, Thir};
 use rustc_middle::ty::TyCtxt;
 use rustc_span::def_id::LocalDefId;
 
 use crate::build::coverageinfo::mcdc::MCDCInfoBuilder;
 use crate::build::{Builder, CFG};
+
+mod mcdc;
 
 pub(crate) struct BranchInfoBuilder {
     /// Maps condition expressions to their enclosing `!`, for better instrumentation.
@@ -117,17 +118,35 @@ impl BranchInfoBuilder {
         }
     }
 
-    fn add_two_way_branch<'tcx>(
+    fn register_two_way_branch<'tcx>(
         &mut self,
+        tcx: TyCtxt<'tcx>,
         cfg: &mut CFG<'tcx>,
         source_info: SourceInfo,
         true_block: BasicBlock,
         false_block: BasicBlock,
     ) {
-        let true_marker = self.markers.inject_block_marker(cfg, source_info, true_block);
-        let false_marker = self.markers.inject_block_marker(cfg, source_info, false_block);
+        // Separate path for handling branches when MC/DC is enabled.
+        if let Some(mcdc_info) = self.mcdc_info.as_mut() {
+            let inject_block_marker =
+                |source_info, block| self.markers.inject_block_marker(cfg, source_info, block);
+            mcdc_info.visit_evaluated_condition(
+                tcx,
+                source_info,
+                true_block,
+                false_block,
+                inject_block_marker,
+            );
+        } else {
+            let true_marker = self.markers.inject_block_marker(cfg, source_info, true_block);
+            let false_marker = self.markers.inject_block_marker(cfg, source_info, false_block);
 
-        self.branch_spans.push(BranchSpan { span: source_info.span, true_marker, false_marker });
+            self.branch_spans.push(BranchSpan {
+                span: source_info.span,
+                true_marker,
+                false_marker,
+            });
+        }
     }
 
     pub(crate) fn into_done(self) -> Option<Box<mir::coverage::BranchInfo>> {
@@ -155,7 +174,71 @@ impl BranchInfoBuilder {
     }
 }
 
-impl Builder<'_, '_> {
+impl<'tcx> Builder<'_, 'tcx> {
+    /// If condition coverage is enabled, inject extra blocks and marker statements
+    /// that will let us track the value of the condition in `place`.
+    pub(crate) fn visit_coverage_standalone_condition(
+        &mut self,
+        mut expr_id: ExprId,     // Expression giving the span of the condition
+        place: mir::Place<'tcx>, // Already holds the boolean condition value
+        block: &mut BasicBlock,
+    ) {
+        // Bail out if condition coverage is not enabled for this function.
+        let Some(branch_info) = self.coverage_branch_info.as_mut() else { return };
+        if !self.tcx.sess.instrument_coverage_condition() {
+            return;
+        };
+
+        // Remove any wrappers, so that we can inspect the real underlying expression.
+        while let ExprKind::Use { source: inner } | ExprKind::Scope { value: inner, .. } =
+            self.thir[expr_id].kind
+        {
+            expr_id = inner;
+        }
+        // If the expression is a lazy logical op, it will naturally get branch
+        // coverage as part of its normal lowering, so we can disregard it here.
+        if let ExprKind::LogicalOp { .. } = self.thir[expr_id].kind {
+            return;
+        }
+
+        let source_info = SourceInfo { span: self.thir[expr_id].span, scope: self.source_scope };
+
+        // Using the boolean value that has already been stored in `place`, set up
+        // control flow in the shape of a diamond, so that we can place separate
+        // marker statements in the true and false blocks. The coverage MIR pass
+        // will use those markers to inject coverage counters as appropriate.
+        //
+        //          block
+        //         /     \
+        // true_block   false_block
+        //  (marker)     (marker)
+        //         \     /
+        //        join_block
+
+        let true_block = self.cfg.start_new_block();
+        let false_block = self.cfg.start_new_block();
+        self.cfg.terminate(
+            *block,
+            source_info,
+            mir::TerminatorKind::if_(mir::Operand::Copy(place), true_block, false_block),
+        );
+
+        // Separate path for handling branches when MC/DC is enabled.
+        branch_info.register_two_way_branch(
+            self.tcx,
+            &mut self.cfg,
+            source_info,
+            true_block,
+            false_block,
+        );
+
+        let join_block = self.cfg.start_new_block();
+        self.cfg.goto(true_block, source_info, join_block);
+        self.cfg.goto(false_block, source_info, join_block);
+        // Any subsequent codegen in the caller should use the new join block.
+        *block = join_block;
+    }
+
     /// If branch coverage is enabled, inject marker statements into `then_block`
     /// and `else_block`, and record their IDs in the table of branch spans.
     pub(crate) fn visit_coverage_branch_condition(
@@ -178,21 +261,37 @@ impl Builder<'_, '_> {
 
         let source_info = SourceInfo { span: self.thir[expr_id].span, scope: self.source_scope };
 
-        // Separate path for handling branches when MC/DC is enabled.
-        if let Some(mcdc_info) = branch_info.mcdc_info.as_mut() {
-            let inject_block_marker = |source_info, block| {
-                branch_info.markers.inject_block_marker(&mut self.cfg, source_info, block)
-            };
-            mcdc_info.visit_evaluated_condition(
-                self.tcx,
-                source_info,
-                then_block,
-                else_block,
-                inject_block_marker,
-            );
-            return;
-        }
+        branch_info.register_two_way_branch(
+            self.tcx,
+            &mut self.cfg,
+            source_info,
+            then_block,
+            else_block,
+        );
+    }
 
-        branch_info.add_two_way_branch(&mut self.cfg, source_info, then_block, else_block);
+    /// If branch coverage is enabled, inject marker statements into `true_block`
+    /// and `false_block`, and record their IDs in the table of branches.
+    ///
+    /// Used to instrument let-else and if-let (including let-chains) for branch coverage.
+    pub(crate) fn visit_coverage_conditional_let(
+        &mut self,
+        pattern: &Pat<'tcx>, // Pattern that has been matched when the true path is taken
+        true_block: BasicBlock,
+        false_block: BasicBlock,
+    ) {
+        // Bail out if branch coverage is not enabled for this function.
+        let Some(branch_info) = self.coverage_branch_info.as_mut() else { return };
+
+        // FIXME(#124144) This may need special handling when MC/DC is enabled.
+
+        let source_info = SourceInfo { span: pattern.span, scope: self.source_scope };
+        branch_info.register_two_way_branch(
+            self.tcx,
+            &mut self.cfg,
+            source_info,
+            true_block,
+            false_block,
+        );
     }
 }

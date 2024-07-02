@@ -11,11 +11,13 @@
     unconditional_panic
 )]
 #![feature(const_mut_refs)]
+#![feature(f128)]
+#![feature(f16)]
 #![warn(clippy::arithmetic_side_effects)]
 
 extern crate proc_macro_derive;
 
-use core::num::{NonZeroUsize, Saturating, Wrapping};
+use core::num::{NonZero, Saturating, Wrapping};
 
 const ONE: i32 = 1;
 const ZERO: i32 = 0;
@@ -162,8 +164,10 @@ pub fn association_with_structures_should_not_trigger_the_lint() {
 }
 
 pub fn hard_coded_allowed() {
+    let _ = 1f16 + 1f16;
     let _ = 1f32 + 1f32;
     let _ = 1f64 + 1f64;
+    let _ = 1f128 + 1f128;
 
     let _ = Saturating(0u32) + Saturating(0u32);
     let _ = String::new() + "";
@@ -494,15 +498,15 @@ pub fn issue_11262() {
 }
 
 pub fn issue_11392() {
-    fn example_div(unsigned: usize, nonzero_unsigned: NonZeroUsize) -> usize {
+    fn example_div(unsigned: usize, nonzero_unsigned: NonZero<usize>) -> usize {
         unsigned / nonzero_unsigned
     }
 
-    fn example_rem(unsigned: usize, nonzero_unsigned: NonZeroUsize) -> usize {
+    fn example_rem(unsigned: usize, nonzero_unsigned: NonZero<usize>) -> usize {
         unsigned % nonzero_unsigned
     }
 
-    let (unsigned, nonzero_unsigned) = (0, NonZeroUsize::new(1).unwrap());
+    let (unsigned, nonzero_unsigned) = (0, NonZero::new(1).unwrap());
     example_div(unsigned, nonzero_unsigned);
     example_rem(unsigned, nonzero_unsigned);
 }

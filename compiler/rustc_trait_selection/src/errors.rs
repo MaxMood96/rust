@@ -1,10 +1,10 @@
 use crate::fluent_generated as fluent;
 use rustc_errors::{
-    codes::*, Applicability, Diag, DiagCtxt, Diagnostic, EmissionGuarantee, Level,
+    codes::*, Applicability, Diag, DiagCtxtHandle, Diagnostic, EmissionGuarantee, Level,
     SubdiagMessageOp, Subdiagnostic,
 };
 use rustc_macros::{Diagnostic, Subdiagnostic};
-use rustc_middle::ty::{self, ClosureKind, PolyTraitRef, Ty};
+use rustc_middle::ty::{self, print::PrintTraitRefExt as _, ClosureKind, PolyTraitRef, Ty};
 use rustc_span::{Span, Symbol};
 
 #[derive(Diagnostic)]
@@ -59,7 +59,7 @@ pub struct NegativePositiveConflict<'tcx> {
 
 impl<G: EmissionGuarantee> Diagnostic<'_, G> for NegativePositiveConflict<'_> {
     #[track_caller]
-    fn into_diag(self, dcx: &DiagCtxt, level: Level) -> Diag<'_, G> {
+    fn into_diag(self, dcx: DiagCtxtHandle<'_>, level: Level) -> Diag<'_, G> {
         let mut diag = Diag::new(dcx, level, fluent::trait_selection_negative_positive_conflict);
         diag.arg("trait_desc", self.trait_desc.print_only_trait_path().to_string());
         diag.arg("self_desc", self.self_ty.map_or_else(|| "none".to_string(), |ty| ty.to_string()));

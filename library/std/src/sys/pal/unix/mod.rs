@@ -20,6 +20,8 @@ pub mod io;
 pub mod kernel_copy;
 #[cfg(target_os = "l4re")]
 mod l4re;
+#[cfg(target_os = "linux")]
+pub mod linux;
 #[cfg(not(target_os = "l4re"))]
 pub mod net;
 #[cfg(target_os = "l4re")]
@@ -31,8 +33,6 @@ pub mod rand;
 pub mod stack_overflow;
 pub mod stdio;
 pub mod thread;
-pub mod thread_local_dtor;
-pub mod thread_local_key;
 pub mod thread_parking;
 pub mod time;
 
@@ -63,11 +63,11 @@ pub unsafe fn init(argc: isize, argv: *const *const u8, sigpipe: u8) {
     args::init(argc, argv);
 
     // Normally, `thread::spawn` will call `Thread::set_name` but since this thread
-    // already exists, we have to call it ourselves. We only do this on macos
+    // already exists, we have to call it ourselves. We only do this on Apple targets
     // because some unix-like operating systems such as Linux share process-id and
     // thread-id for the main thread and so renaming the main thread will rename the
     // process and we only want to enable this on platforms we've tested.
-    if cfg!(target_os = "macos") {
+    if cfg!(target_vendor = "apple") {
         thread::Thread::set_name(&c"main");
     }
 
@@ -399,13 +399,12 @@ cfg_if::cfg_if! {
         // Use libumem for the (malloc-compatible) allocator
         #[link(name = "umem")]
         extern "C" {}
-    } else if #[cfg(target_os = "macos")] {
+    } else if #[cfg(target_vendor = "apple")] {
+        // Link to `libSystem.dylib`.
+        //
+        // Don't get confused by the presence of `System.framework`,
+        // it is a deprecated wrapper over the dynamic library.
         #[link(name = "System")]
-        extern "C" {}
-    } else if #[cfg(all(target_vendor = "apple", not(target_os = "macos")))] {
-        #[link(name = "System")]
-        #[link(name = "objc")]
-        #[link(name = "Foundation", kind = "framework")]
         extern "C" {}
     } else if #[cfg(target_os = "fuchsia")] {
         #[link(name = "zircon")]

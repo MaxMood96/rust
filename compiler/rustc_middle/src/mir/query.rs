@@ -1,7 +1,7 @@
 //! Values computed by queries that use MIR.
 
 use crate::mir;
-use crate::ty::{self, OpaqueHiddenType, Ty, TyCtxt};
+use crate::ty::{self, CoroutineArgsExt, OpaqueHiddenType, Ty, TyCtxt};
 use rustc_data_structures::fx::FxIndexMap;
 use rustc_errors::ErrorGuaranteed;
 use rustc_hir::def_id::LocalDefId;
@@ -362,8 +362,4 @@ pub struct CoverageIdsInfo {
     /// InstrumentCoverage MIR pass, if the highest-numbered counter increments
     /// were removed by MIR optimizations.
     pub max_counter_id: mir::coverage::CounterId,
-
-    /// Coverage codegen for mcdc needs to know the size of the global bitmap so that it can
-    /// set the `bytemap-bytes` argument of the `llvm.instrprof.mcdc.tvbitmap.update` intrinsic.
-    pub mcdc_bitmap_bytes: u32,
 }

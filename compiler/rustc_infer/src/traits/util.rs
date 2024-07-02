@@ -1,9 +1,9 @@
 use smallvec::smallvec;
 
 use crate::infer::outlives::components::{push_outlives_components, Component};
-use crate::traits::{self, Obligation, PredicateObligation};
+use crate::traits::{self, Obligation, ObligationCauseCode, PredicateObligation};
 use rustc_data_structures::fx::FxHashSet;
-use rustc_middle::ty::{self, ToPredicate, Ty, TyCtxt};
+use rustc_middle::ty::{self, Ty, TyCtxt, Upcast};
 use rustc_span::symbol::Ident;
 use rustc_span::Span;
 
@@ -129,7 +129,7 @@ impl<'tcx> Elaboratable<'tcx> for PredicateObligation<'tcx> {
         index: usize,
     ) -> Self {
         let cause = self.cause.clone().derived_cause(parent_trait_pred, |derived| {
-            traits::ImplDerivedObligation(Box::new(traits::ImplDerivedObligationCause {
+            ObligationCauseCode::ImplDerived(Box::new(traits::ImplDerivedCause {
                 derived,
                 impl_or_alias_def_id: parent_trait_pred.def_id(),
                 impl_def_predicate_index: Some(index),
@@ -275,18 +275,17 @@ impl<'tcx, O: Elaboratable<'tcx>> Elaborator<'tcx, O> {
                 }
                 // Get predicates implied by the trait, or only super predicates if we only care about self predicates.
                 let predicates = match self.mode {
-                    Filter::All => tcx.implied_predicates_of(data.def_id()),
-                    Filter::OnlySelf => tcx.super_predicates_of(data.def_id()),
+                    Filter::All => tcx.explicit_implied_predicates_of(data.def_id()),
+                    Filter::OnlySelf => tcx.explicit_super_predicates_of(data.def_id()),
                     Filter::OnlySelfThatDefines(ident) => {
-                        tcx.super_predicates_that_define_assoc_item((data.def_id(), ident))
+                        tcx.explicit_supertraits_containing_assoc_item((data.def_id(), ident))
                     }
                 };
 
                 let obligations =
                     predicates.predicates.iter().enumerate().map(|(index, &(clause, span))| {
                         elaboratable.child_with_derived_cause(
-                            clause
-                                .instantiate_supertrait(tcx, &bound_clause.rebind(data.trait_ref)),
+                            clause.instantiate_supertrait(tcx, bound_clause.rebind(data.trait_ref)),
                             span,
                             bound_clause.rebind(data),
                             index,
@@ -357,9 +356,7 @@ impl<'tcx, O: Elaboratable<'tcx>> Elaborator<'tcx, O> {
                                 None
                             }
                         })
-                        .map(|clause| {
-                            elaboratable.child(bound_clause.rebind(clause).to_predicate(tcx))
-                        }),
+                        .map(|clause| elaboratable.child(bound_clause.rebind(clause).upcast(tcx))),
                 );
             }
             ty::ClauseKind::RegionOutlives(..) => {
@@ -409,21 +406,21 @@ pub fn supertraits<'tcx>(
     tcx: TyCtxt<'tcx>,
     trait_ref: ty::PolyTraitRef<'tcx>,
 ) -> FilterToTraits<Elaborator<'tcx, ty::Predicate<'tcx>>> {
-    elaborate(tcx, [trait_ref.to_predicate(tcx)]).filter_only_self().filter_to_traits()
+    elaborate(tcx, [trait_ref.upcast(tcx)]).filter_only_self().filter_to_traits()
 }
 
 pub fn transitive_bounds<'tcx>(
     tcx: TyCtxt<'tcx>,
     trait_refs: impl Iterator<Item = ty::PolyTraitRef<'tcx>>,
 ) -> FilterToTraits<Elaborator<'tcx, ty::Predicate<'tcx>>> {
-    elaborate(tcx, trait_refs.map(|trait_ref| trait_ref.to_predicate(tcx)))
+    elaborate(tcx, trait_refs.map(|trait_ref| trait_ref.upcast(tcx)))
         .filter_only_self()
         .filter_to_traits()
 }
 
 /// A specialized variant of `elaborate` that only elaborates trait references that may
 /// define the given associated item with the name `assoc_name`. It uses the
-/// `super_predicates_that_define_assoc_item` query to avoid enumerating super-predicates that
+/// `explicit_supertraits_containing_assoc_item` query to avoid enumerating super-predicates that
 /// aren't related to `assoc_item`. This is used when resolving types like `Self::Item` or
 /// `T::Item` and helps to avoid cycle errors (see e.g. #35237).
 pub fn transitive_bounds_that_define_assoc_item<'tcx>(
@@ -431,7 +428,7 @@ pub fn transitive_bounds_that_define_assoc_item<'tcx>(
     trait_refs: impl Iterator<Item = ty::PolyTraitRef<'tcx>>,
     assoc_name: Ident,
 ) -> FilterToTraits<Elaborator<'tcx, ty::Predicate<'tcx>>> {
-    elaborate(tcx, trait_refs.map(|trait_ref| trait_ref.to_predicate(tcx)))
+    elaborate(tcx, trait_refs.map(|trait_ref| trait_ref.upcast(tcx)))
         .filter_only_self_that_defines(assoc_name)
         .filter_to_traits()
 }
@@ -457,7 +454,7 @@ impl<'tcx, I: Iterator<Item = ty::Predicate<'tcx>>> Iterator for FilterToTraits<
 
     fn next(&mut self) -> Option<ty::PolyTraitRef<'tcx>> {
         while let Some(pred) = self.base_iterator.next() {
-            if let Some(data) = pred.to_opt_poly_trait_pred() {
+            if let Some(data) = pred.as_trait_clause() {
                 return Some(data.map_bound(|t| t.trait_ref));
             }
         }

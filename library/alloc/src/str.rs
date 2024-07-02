@@ -206,15 +206,16 @@ impl BorrowMut<str> for String {
 #[stable(feature = "rust1", since = "1.0.0")]
 impl ToOwned for str {
     type Owned = String;
+
     #[inline]
     fn to_owned(&self) -> String {
         unsafe { String::from_utf8_unchecked(self.as_bytes().to_owned()) }
     }
 
+    #[inline]
     fn clone_into(&self, target: &mut String) {
-        let mut b = mem::take(target).into_bytes();
-        self.as_bytes().clone_into(&mut b);
-        *target = unsafe { String::from_utf8_unchecked(b) }
+        target.clear();
+        target.push_str(self);
     }
 }
 
@@ -375,14 +376,16 @@ impl str {
         // Safety: We have written only valid ASCII to our vec
         let mut s = unsafe { String::from_utf8_unchecked(out) };
 
-        for (i, c) in rest[..].char_indices() {
+        for (i, c) in rest.char_indices() {
             if c == 'Σ' {
                 // Σ maps to σ, except at the end of a word where it maps to ς.
                 // This is the only conditional (contextual) but language-independent mapping
                 // in `SpecialCasing.txt`,
                 // so hard-code it rather than have a generic "condition" mechanism.
                 // See https://github.com/rust-lang/rust/issues/26035
-                map_uppercase_sigma(rest, i, &mut s)
+                let out_len = self.len() - rest.len();
+                let sigma_lowercase = map_uppercase_sigma(&self, i + out_len);
+                s.push(sigma_lowercase);
             } else {
                 match conversions::to_lower(c) {
                     [a, '\0', _] => s.push(a),
@@ -400,13 +403,13 @@ impl str {
         }
         return s;
 
-        fn map_uppercase_sigma(from: &str, i: usize, to: &mut String) {
+        fn map_uppercase_sigma(from: &str, i: usize) -> char {
             // See https://www.unicode.org/versions/Unicode7.0.0/ch03.pdf#G33992
             // for the definition of `Final_Sigma`.
             debug_assert!('Σ'.len_utf8() == 2);
             let is_word_final = case_ignorable_then_cased(from[..i].chars().rev())
                 && !case_ignorable_then_cased(from[i + 2..].chars());
-            to.push_str(if is_word_final { "ς" } else { "σ" });
+            if is_word_final { 'ς' } else { 'σ' }
         }
 
         fn case_ignorable_then_cased<I: Iterator<Item = char>>(iter: I) -> bool {

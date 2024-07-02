@@ -1,4 +1,3 @@
-use crate::infer::type_variable::TypeVariableOrigin;
 use crate::infer::InferCtxt;
 use crate::traits::{Obligation, ObligationCause, ObligationCtxt};
 use rustc_errors::{codes::*, pluralize, struct_span_code_err, Applicability, Diag};
@@ -89,7 +88,7 @@ impl<'tcx> InferCtxt<'tcx> {
         found_args: Vec<ArgKind>,
         is_closure: bool,
         closure_arg_span: Option<Span>,
-    ) -> Diag<'tcx> {
+    ) -> Diag<'_> {
         let kind = if is_closure { "closure" } else { "function" };
 
         let args_str = |arguments: &[ArgKind], other: &[ArgKind]| {
@@ -218,8 +217,7 @@ impl<'tcx> InferCtxt<'tcx> {
                 let Some(trait_def_id) = trait_def_id else { continue };
                 // Make a fresh inference variable so we can determine what the generic parameters
                 // of the trait are.
-                let var =
-                    self.next_ty_var(TypeVariableOrigin { span: DUMMY_SP, param_def_id: None });
+                let var = self.next_ty_var(DUMMY_SP);
                 // FIXME(effects)
                 let trait_ref = ty::TraitRef::new(self.tcx, trait_def_id, [ty.skip_binder(), var]);
                 let obligation = Obligation::new(

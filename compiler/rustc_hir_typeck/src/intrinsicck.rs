@@ -2,6 +2,7 @@ use hir::HirId;
 use rustc_errors::{codes::*, struct_span_code_err};
 use rustc_hir as hir;
 use rustc_index::Idx;
+use rustc_middle::bug;
 use rustc_middle::ty::layout::{LayoutError, SizeSkeleton};
 use rustc_middle::ty::{self, Ty, TyCtxt, TypeVisitableExt};
 use rustc_target::abi::{Pointer, VariantIdx};
@@ -51,7 +52,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             // Note: this path is currently not reached in any test, so any
             // example that triggers this would be worth minimizing and
             // converting into a test.
-            tcx.dcx().span_bug(span, "argument to transmute has inference variables");
+            self.dcx().span_bug(span, "argument to transmute has inference variables");
         }
         // Transmutes that are only changing lifetimes are always ok.
         if from == to {
@@ -72,10 +73,10 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             // Special-case transmuting from `typeof(function)` and
             // `Option<typeof(function)>` to present a clearer error.
             let from = unpack_option_like(tcx, from);
-            if let (&ty::FnDef(..), SizeSkeleton::Known(size_to)) = (from.kind(), sk_to)
+            if let (&ty::FnDef(..), SizeSkeleton::Known(size_to, _)) = (from.kind(), sk_to)
                 && size_to == Pointer(dl.instruction_address_space).size(&tcx)
             {
-                struct_span_code_err!(tcx.dcx(), span, E0591, "can't transmute zero-sized type")
+                struct_span_code_err!(self.dcx(), span, E0591, "can't transmute zero-sized type")
                     .with_note(format!("source type: {from}"))
                     .with_note(format!("target type: {to}"))
                     .with_help("cast with `as` to a pointer instead")
@@ -87,7 +88,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // Try to display a sensible error with as much information as possible.
         let skeleton_string = |ty: Ty<'tcx>, sk: Result<_, &_>| match sk {
             Ok(SizeSkeleton::Pointer { tail, .. }) => format!("pointer to `{tail}`"),
-            Ok(SizeSkeleton::Known(size)) => {
+            Ok(SizeSkeleton::Known(size, _)) => {
                 if let Some(v) = u128::from(size.bytes()).checked_mul(8) {
                     format!("{v} bits")
                 } else {
@@ -115,7 +116,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         };
 
         let mut err = struct_span_code_err!(
-            tcx.dcx(),
+            self.dcx(),
             span,
             E0512,
             "cannot transmute between types of different sizes, \

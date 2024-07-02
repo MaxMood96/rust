@@ -281,13 +281,13 @@ impl DeepRejectCtxt {
             }
             ty::FnPtr(obl_sig) => match k {
                 ty::FnPtr(impl_sig) => {
-                    let ty::FnSig { inputs_and_output, c_variadic, unsafety, abi } =
+                    let ty::FnSig { inputs_and_output, c_variadic, safety, abi } =
                         obl_sig.skip_binder();
                     let impl_sig = impl_sig.skip_binder();
 
                     abi == impl_sig.abi
                         && c_variadic == impl_sig.c_variadic
-                        && unsafety == impl_sig.unsafety
+                        && safety == impl_sig.safety
                         && inputs_and_output.len() == impl_sig.inputs_and_output.len()
                         && iter::zip(inputs_and_output, impl_sig.inputs_and_output)
                             .all(|(obl, imp)| self.types_may_unify(obl, imp))
@@ -337,7 +337,7 @@ impl DeepRejectCtxt {
             | ty::ConstKind::Error(_) => {
                 return true;
             }
-            ty::ConstKind::Value(impl_val) => impl_val,
+            ty::ConstKind::Value(_, impl_val) => impl_val,
             ty::ConstKind::Infer(_) | ty::ConstKind::Bound(..) | ty::ConstKind::Placeholder(_) => {
                 bug!("unexpected impl arg: {:?}", impl_ct)
             }
@@ -357,7 +357,7 @@ impl DeepRejectCtxt {
             ty::ConstKind::Expr(_) | ty::ConstKind::Unevaluated(_) | ty::ConstKind::Error(_) => {
                 true
             }
-            ty::ConstKind::Value(obl_val) => obl_val == impl_val,
+            ty::ConstKind::Value(_, obl_val) => obl_val == impl_val,
 
             ty::ConstKind::Infer(_) => true,
 

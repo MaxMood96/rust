@@ -69,15 +69,10 @@ const_eval_deref_function_pointer =
     accessing {$allocation} which contains a function
 const_eval_deref_vtable_pointer =
     accessing {$allocation} which contains a vtable
-const_eval_different_allocations =
-    `{$name}` called on pointers into different allocations
-
 const_eval_division_by_zero =
     dividing by zero
 const_eval_division_overflow =
     overflow in signed division (dividing MIN by -1)
-const_eval_double_storage_live =
-    StorageLive on a local that was already live
 
 const_eval_dyn_call_not_a_method =
     `dyn` call trying to call something that is not a method
@@ -94,6 +89,8 @@ const_eval_exact_div_has_remainder =
 
 const_eval_extern_static =
     cannot access extern static ({$did})
+const_eval_extern_type_field = `extern type` field does not have a known offset
+
 const_eval_fn_ptr_call =
     function pointers need an RFC before allowed to be called in {const_eval_const_context}s
 const_eval_for_loop_into_iter_non_const =
@@ -234,20 +231,25 @@ const_eval_not_enough_caller_args =
 const_eval_nullary_intrinsic_fail =
     could not evaluate nullary intrinsic
 
+const_eval_offset_from_different_allocations =
+    `{$name}` called on pointers into different allocations
+const_eval_offset_from_different_integers =
+    `{$name}` called on different pointers without provenance (i.e., without an associated allocation)
 const_eval_offset_from_overflow =
     `{$name}` called when first pointer is too far ahead of second
-
-const_eval_offset_from_test = out-of-bounds `offset_from`
+const_eval_offset_from_test =
+    out-of-bounds `offset_from`
 const_eval_offset_from_underflow =
     `{$name}` called when first pointer is too far before second
+const_eval_offset_from_unsigned_overflow =
+    `ptr_offset_from_unsigned` called when first pointer has smaller offset than second: {$a_offset} < {$b_offset}
 
 const_eval_operator_non_const =
     cannot call non-const operator in {const_eval_const_context}s
-const_eval_overflow =
-    overflow executing `{$name}`
-
+const_eval_overflow_arith =
+    arithmetic overflow in `{$intrinsic}`
 const_eval_overflow_shift =
-    overflowing shift by {$val} in `{$name}`
+    overflowing shift by {$shift_amount} in `{$intrinsic}`
 
 const_eval_panic =
     the evaluated program panicked at '{$msg}', {$file}:{$line}:{$col}
@@ -341,8 +343,7 @@ const_eval_unallowed_fn_pointer_call = function pointer calls are not allowed in
 const_eval_unallowed_heap_allocations =
     allocations are not allowed in {const_eval_const_context}s
     .label = allocation not allowed in {const_eval_const_context}s
-    .teach_note =
-        The value of statics and constants must be known at compile time, and they live for the entire lifetime of a program. Creating a boxed value allocates memory on the heap at runtime, and therefore cannot be done at compile time.
+    .teach_note = The value of statics and constants must be known at compile time, and they live for the entire lifetime of a program. Creating a boxed value allocates memory on the heap at runtime, and therefore cannot be done at compile time.
 
 const_eval_unallowed_inline_asm =
     inline assembly is not allowed in {const_eval_const_context}s
@@ -381,8 +382,6 @@ const_eval_unreachable = entering unreachable code
 const_eval_unreachable_unwind =
     unwinding past a stack frame that does not allow unwinding
 
-const_eval_unsigned_offset_from_overflow =
-    `ptr_offset_from_unsigned` called when first pointer has smaller offset than second: {$a_offset} < {$b_offset}
 const_eval_unsized_local = unsized locals are not supported
 const_eval_unstable_const_fn = `{$def_path}` is not yet stable as a const fn
 
@@ -399,7 +398,6 @@ const_eval_unwind_past_top =
 
 ## The `front_matter`s here refer to either `const_eval_front_matter_invalid_value` or `const_eval_front_matter_invalid_value_with_path`.
 ## (We'd love to sort this differently to make that more clear but tidy won't let us...)
-const_eval_validation_box_to_static = {$front_matter}: encountered a box pointing to a static variable in a constant
 const_eval_validation_box_to_uninhabited = {$front_matter}: encountered a box pointing to uninhabited type {$ty}
 
 const_eval_validation_const_ref_to_extern = {$front_matter}: encountered reference to `extern` static in `const`
@@ -454,7 +452,6 @@ const_eval_validation_out_of_range = {$front_matter}: encountered {$value}, but 
 const_eval_validation_partial_pointer = {$front_matter}: encountered a partial pointer or a mix of pointers
 const_eval_validation_pointer_as_int = {$front_matter}: encountered a pointer, but {$expected}
 const_eval_validation_ptr_out_of_range = {$front_matter}: encountered a pointer, but expected something that cannot possibly fail to be {$in_range}
-const_eval_validation_ref_to_static = {$front_matter}: encountered a reference pointing to a static variable in a constant
 const_eval_validation_ref_to_uninhabited = {$front_matter}: encountered a reference pointing to uninhabited type {$ty}
 const_eval_validation_unaligned_box = {$front_matter}: encountered an unaligned box (required {$required_bytes} byte alignment but found {$found_bytes})
 const_eval_validation_unaligned_ref = {$front_matter}: encountered an unaligned reference (required {$required_bytes} byte alignment but found {$found_bytes})

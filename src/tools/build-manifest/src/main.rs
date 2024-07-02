@@ -25,6 +25,7 @@ static HOSTS: &[&str] = &[
     "i686-pc-windows-msvc",
     "i686-unknown-linux-gnu",
     "loongarch64-unknown-linux-gnu",
+    "loongarch64-unknown-linux-musl",
     "mips-unknown-linux-gnu",
     "mips64-unknown-linux-gnuabi64",
     "mips64el-unknown-linux-gnuabi64",
@@ -71,6 +72,7 @@ static TARGETS: &[&str] = &[
     "arm-unknown-linux-gnueabihf",
     "arm-unknown-linux-musleabi",
     "arm-unknown-linux-musleabihf",
+    "arm64ec-pc-windows-msvc",
     "armv5te-unknown-linux-gnueabi",
     "armv5te-unknown-linux-musleabi",
     "armv7-linux-androideabi",
@@ -102,8 +104,10 @@ static TARGETS: &[&str] = &[
     "i686-unknown-freebsd",
     "i686-unknown-linux-gnu",
     "i686-unknown-linux-musl",
+    "i686-unknown-redox",
     "i686-unknown-uefi",
     "loongarch64-unknown-linux-gnu",
+    "loongarch64-unknown-linux-musl",
     "loongarch64-unknown-none",
     "loongarch64-unknown-none-softfloat",
     "m68k-unknown-linux-gnu",
@@ -236,7 +240,7 @@ fn main() {
     let num_threads = if let Some(num) = env::var_os("BUILD_MANIFEST_NUM_THREADS") {
         num.to_str().unwrap().parse().expect("invalid number for BUILD_MANIFEST_NUM_THREADS")
     } else {
-        std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+        std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
     };
     rayon::ThreadPoolBuilder::new()
         .num_threads(num_threads)
@@ -494,7 +498,7 @@ impl Builder {
                 Some(p) => p,
                 None => return false,
             };
-            pkg.target.get(&c.target).is_some()
+            pkg.target.contains_key(&c.target)
         };
         extensions.retain(&has_component);
         components.retain(&has_component);

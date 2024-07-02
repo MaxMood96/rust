@@ -1,6 +1,7 @@
+//! The expansion from a test function to the appropriate test struct for libtest
+//! Ideally, this code would be in libtest but for efficiency and error messages it lives here.
+
 use crate::errors;
-/// The expansion from a test function to the appropriate test struct for libtest
-/// Ideally, this code would be in libtest but for efficiency and error messages it lives here.
 use crate::util::{check_builtin_macro_attribute, warn_on_duplicate_attribute};
 use rustc_ast::ptr::P;
 use rustc_ast::{self as ast, attr, GenericParamKind};
@@ -549,7 +550,7 @@ fn check_test_signature(
     let has_should_panic_attr = attr::contains_name(&i.attrs, sym::should_panic);
     let dcx = cx.dcx();
 
-    if let ast::Unsafe::Yes(span) = f.sig.header.unsafety {
+    if let ast::Safety::Unsafe(span) = f.sig.header.safety {
         return Err(dcx.emit_err(errors::TestBadFn { span: i.span, cause: span, kind: "unsafe" }));
     }
 
