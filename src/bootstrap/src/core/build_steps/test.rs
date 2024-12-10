@@ -471,11 +471,11 @@ impl Miri {
         // We re-use the `cargo` from above.
         cargo.arg("--print-sysroot");
 
-        builder.verbose(|| println!("running: {cargo:?}"));
+        builder.verbose(|| eprintln!("running: {cargo:?}"));
         let stdout = cargo.run_capture_stdout(builder).stdout();
         // Output is "<sysroot>\n".
         let sysroot = stdout.trim_end();
-        builder.verbose(|| println!("`cargo miri setup --print-sysroot` said: {sysroot:?}"));
+        builder.verbose(|| eprintln!("`cargo miri setup --print-sysroot` said: {sysroot:?}"));
         PathBuf::from(sysroot)
     }
 }
@@ -1070,23 +1070,33 @@ impl Step for Tidy {
         }
 
         if builder.config.channel == "dev" || builder.config.channel == "nightly" {
-            builder.info("fmt check");
-            if builder.initial_rustfmt().is_none() {
-                let inferred_rustfmt_dir = builder.initial_sysroot.join("bin");
-                eprintln!(
-                    "\
+            if !builder.config.json_output {
+                builder.info("fmt check");
+                if builder.initial_rustfmt().is_none() {
+                    let inferred_rustfmt_dir = builder.initial_sysroot.join("bin");
+                    eprintln!(
+                        "\
 ERROR: no `rustfmt` binary found in {PATH}
 INFO: `rust.channel` is currently set to \"{CHAN}\"
 HELP: if you are testing a beta branch, set `rust.channel` to \"beta\" in the `config.toml` file
 HELP: to skip test's attempt to check tidiness, pass `--skip src/tools/tidy` to `x.py test`",
-                    PATH = inferred_rustfmt_dir.display(),
-                    CHAN = builder.config.channel,
+                        PATH = inferred_rustfmt_dir.display(),
+                        CHAN = builder.config.channel,
+                    );
+                    crate::exit!(1);
+                }
+                let all = false;
+                crate::core::build_steps::format::format(
+                    builder,
+                    !builder.config.cmd.bless(),
+                    all,
+                    &[],
                 );
-                crate::exit!(1);
+            } else {
+                eprintln!(
+                    "WARNING: `--json-output` is not supported on rustfmt, formatting will be skipped"
+                );
             }
-            let all = false;
-            crate::core::build_steps::format::format(builder, !builder.config.cmd.bless(), all, &[
-            ]);
         }
 
         builder.info("tidy check");
@@ -2478,7 +2488,7 @@ fn markdown_test(builder: &Builder<'_>, compiler: Compiler, markdown: &Path) -> 
         }
     }
 
-    builder.verbose(|| println!("doc tests for: {}", markdown.display()));
+    builder.verbose(|| eprintln!("doc tests for: {}", markdown.display()));
     let mut cmd = builder.rustdoc_cmd(compiler);
     builder.add_rust_test_threads(&mut cmd);
     // allow for unstable options such as new editions
@@ -2624,6 +2634,11 @@ fn prepare_cargo_test(
     if builder.kind == Kind::Test && !builder.fail_fast {
         cargo.arg("--no-fail-fast");
     }
+
+    if builder.config.json_output {
+        cargo.arg("--message-format=json");
+    }
+
     match builder.doc_tests {
         DocTests::Only => {
             cargo.arg("--doc");

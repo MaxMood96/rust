@@ -1120,13 +1120,14 @@ fn walk_poly_trait_ref<T: MutVisitor>(vis: &mut T, p: &mut PolyTraitRef) {
 }
 
 pub fn walk_field_def<T: MutVisitor>(visitor: &mut T, fd: &mut FieldDef) {
-    let FieldDef { span, ident, vis, id, ty, attrs, is_placeholder: _, safety } = fd;
+    let FieldDef { span, ident, vis, id, ty, attrs, is_placeholder: _, safety, default } = fd;
     visitor.visit_id(id);
     visit_attrs(visitor, attrs);
     visitor.visit_vis(vis);
     visit_safety(visitor, safety);
     visit_opt(ident, |ident| visitor.visit_ident(ident));
     visitor.visit_ty(ty);
+    visit_opt(default, |default| visitor.visit_anon_const(default));
     visitor.visit_span(span);
 }
 
@@ -1524,6 +1525,10 @@ pub fn walk_pat<T: MutVisitor>(vis: &mut T, pat: &mut P<Pat>) {
             visit_opt(e1, |e| vis.visit_expr(e));
             visit_opt(e2, |e| vis.visit_expr(e));
             vis.visit_span(span);
+        }
+        PatKind::Guard(p, e) => {
+            vis.visit_pat(p);
+            vis.visit_expr(e);
         }
         PatKind::Tuple(elems) | PatKind::Slice(elems) | PatKind::Or(elems) => {
             visit_thin_vec(elems, |elem| vis.visit_pat(elem))
