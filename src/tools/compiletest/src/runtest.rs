@@ -22,7 +22,7 @@ use crate::common::{
     UI_STDERR, UI_STDOUT, UI_SVG, UI_WINDOWS_SVG, Ui, expected_output_path, incremental_dir,
     output_base_dir, output_base_name, output_testname_unique,
 };
-use crate::compute_diff::{write_diff, write_filtered_diff};
+use crate::compute_diff::{DiffLine, make_diff, write_diff, write_filtered_diff};
 use crate::errors::{self, Error, ErrorKind};
 use crate::header::TestProps;
 use crate::read2::{Truncated, read2_abbreviated};
@@ -131,7 +131,7 @@ pub fn run(config: Arc<Config>, testpaths: &TestPaths, revision: Option<&str>) {
 
     if config.verbose {
         // We're going to be dumping a lot of info. Start on a new line.
-        print!("\n\n");
+        eprintln!("\n");
     }
     debug!("running {:?}", testpaths.file.display());
     let mut props = TestProps::from_file(&testpaths.file, revision, &config);
@@ -353,7 +353,7 @@ impl<'test> TestCx<'test> {
                 {
                     self.error(&format!("{} test did not emit an error", self.config.mode));
                     if self.config.mode == crate::common::Mode::Ui {
-                        println!("note: by default, ui tests are expected not to compile");
+                        eprintln!("note: by default, ui tests are expected not to compile");
                     }
                     proc_res.fatal(None, || ());
                 };
@@ -774,20 +774,20 @@ impl<'test> TestCx<'test> {
                 unexpected.len(),
                 not_found.len()
             ));
-            println!("status: {}\ncommand: {}\n", proc_res.status, proc_res.cmdline);
+            eprintln!("status: {}\ncommand: {}\n", proc_res.status, proc_res.cmdline);
             if !unexpected.is_empty() {
-                println!("{}", "--- unexpected errors (from JSON output) ---".green());
+                eprintln!("{}", "--- unexpected errors (from JSON output) ---".green());
                 for error in &unexpected {
-                    println!("{}", error.render_for_expected());
+                    eprintln!("{}", error.render_for_expected());
                 }
-                println!("{}", "---".green());
+                eprintln!("{}", "---".green());
             }
             if !not_found.is_empty() {
-                println!("{}", "--- not found errors (from test file) ---".red());
+                eprintln!("{}", "--- not found errors (from test file) ---".red());
                 for error in &not_found {
-                    println!("{}", error.render_for_expected());
+                    eprintln!("{}", error.render_for_expected());
                 }
-                println!("{}", "---\n".red());
+                eprintln!("{}", "---\n".red());
             }
             panic!("errors differ from expected");
         }
@@ -1876,18 +1876,18 @@ impl<'test> TestCx<'test> {
 
     fn maybe_dump_to_stdout(&self, out: &str, err: &str) {
         if self.config.verbose {
-            println!("------stdout------------------------------");
-            println!("{}", out);
-            println!("------stderr------------------------------");
-            println!("{}", err);
-            println!("------------------------------------------");
+            eprintln!("------stdout------------------------------");
+            eprintln!("{}", out);
+            eprintln!("------stderr------------------------------");
+            eprintln!("{}", err);
+            eprintln!("------------------------------------------");
         }
     }
 
     fn error(&self, err: &str) {
         match self.revision {
-            Some(rev) => println!("\nerror in revision `{}`: {}", rev, err),
-            None => println!("\nerror: {}", err),
+            Some(rev) => eprintln!("\nerror in revision `{}`: {}", rev, err),
+            None => eprintln!("\nerror: {}", err),
         }
     }
 
@@ -1972,7 +1972,7 @@ impl<'test> TestCx<'test> {
         if !self.config.has_html_tidy {
             return;
         }
-        println!("info: generating a diff against nightly rustdoc");
+        eprintln!("info: generating a diff against nightly rustdoc");
 
         let suffix =
             self.safe_revision().map_or("nightly".into(), |path| path.to_owned() + "-nightly");
@@ -2082,7 +2082,7 @@ impl<'test> TestCx<'test> {
                 .output()
                 .unwrap();
             assert!(output.status.success());
-            println!("{}", String::from_utf8_lossy(&output.stdout));
+            eprintln!("{}", String::from_utf8_lossy(&output.stdout));
             eprintln!("{}", String::from_utf8_lossy(&output.stderr));
         } else {
             use colored::Colorize;
@@ -2295,17 +2295,31 @@ impl<'test> TestCx<'test> {
         match output_kind {
             TestOutput::Compile => {
                 if !self.props.dont_check_compiler_stdout {
-                    errors +=
-                        self.compare_output(stdout_kind, &normalized_stdout, &expected_stdout);
+                    errors += self.compare_output(
+                        stdout_kind,
+                        &normalized_stdout,
+                        &proc_res.stdout,
+                        &expected_stdout,
+                    );
                 }
                 if !self.props.dont_check_compiler_stderr {
-                    errors +=
-                        self.compare_output(stderr_kind, &normalized_stderr, &expected_stderr);
+                    errors += self.compare_output(
+                        stderr_kind,
+                        &normalized_stderr,
+                        &stderr,
+                        &expected_stderr,
+                    );
                 }
             }
             TestOutput::Run => {
-                errors += self.compare_output(stdout_kind, &normalized_stdout, &expected_stdout);
-                errors += self.compare_output(stderr_kind, &normalized_stderr, &expected_stderr);
+                errors += self.compare_output(
+                    stdout_kind,
+                    &normalized_stdout,
+                    &proc_res.stdout,
+                    &expected_stdout,
+                );
+                errors +=
+                    self.compare_output(stderr_kind, &normalized_stderr, &stderr, &expected_stderr);
             }
         }
         errors
@@ -2482,7 +2496,7 @@ impl<'test> TestCx<'test> {
                 )"#
             )
             .replace_all(&output, |caps: &Captures<'_>| {
-                println!("{}", &caps[0]);
+                eprintln!("{}", &caps[0]);
                 caps[0].replace(r"\", "/")
             })
             .replace("\r\n", "\n")
@@ -2533,7 +2547,13 @@ impl<'test> TestCx<'test> {
         }
     }
 
-    fn compare_output(&self, stream: &str, actual: &str, expected: &str) -> usize {
+    fn compare_output(
+        &self,
+        stream: &str,
+        actual: &str,
+        actual_unnormalized: &str,
+        expected: &str,
+    ) -> usize {
         let are_different = match (self.force_color_svg(), expected.find('\n'), actual.find('\n')) {
             // FIXME: We ignore the first line of SVG files
             // because the width parameter is non-deterministic.
@@ -2581,37 +2601,23 @@ impl<'test> TestCx<'test> {
         if let Err(err) = fs::write(&actual_path, &actual) {
             self.fatal(&format!("failed to write {stream} to `{actual_path:?}`: {err}",));
         }
-        println!("Saved the actual {stream} to {actual_path:?}");
+        eprintln!("Saved the actual {stream} to {actual_path:?}");
 
         let expected_path =
             expected_output_path(self.testpaths, self.revision, &self.config.compare_mode, stream);
 
         if !self.config.bless {
             if expected.is_empty() {
-                println!("normalized {}:\n{}\n", stream, actual);
+                eprintln!("normalized {}:\n{}\n", stream, actual);
             } else {
-                println!("diff of {stream}:\n");
-                if let Some(diff_command) = self.config.diff_command.as_deref() {
-                    let mut args = diff_command.split_whitespace();
-                    let name = args.next().unwrap();
-                    match Command::new(name)
-                        .args(args)
-                        .args([&expected_path, &actual_path])
-                        .output()
-                    {
-                        Err(err) => {
-                            self.fatal(&format!(
-                                "failed to call custom diff command `{diff_command}`: {err}"
-                            ));
-                        }
-                        Ok(output) => {
-                            let output = String::from_utf8_lossy(&output.stdout);
-                            print!("{output}");
-                        }
-                    }
-                } else {
-                    print!("{}", write_diff(expected, actual, 3));
-                }
+                self.show_diff(
+                    stream,
+                    &expected_path,
+                    &actual_path,
+                    expected,
+                    actual,
+                    actual_unnormalized,
+                );
             }
         } else {
             // Delete non-revision .stderr/.stdout file if revisions are used.
@@ -2625,12 +2631,82 @@ impl<'test> TestCx<'test> {
             if let Err(err) = fs::write(&expected_path, &actual) {
                 self.fatal(&format!("failed to write {stream} to `{expected_path:?}`: {err}"));
             }
-            println!("Blessing the {stream} of {test_name} in {expected_path:?}");
+            eprintln!("Blessing the {stream} of {test_name} in {expected_path:?}");
         }
 
-        println!("\nThe actual {0} differed from the expected {0}.", stream);
+        eprintln!("\nThe actual {0} differed from the expected {0}.", stream);
 
         if self.config.bless { 0 } else { 1 }
+    }
+
+    /// Returns whether to show the full stderr/stdout.
+    fn show_diff(
+        &self,
+        stream: &str,
+        expected_path: &Path,
+        actual_path: &Path,
+        expected: &str,
+        actual: &str,
+        actual_unnormalized: &str,
+    ) {
+        eprintln!("diff of {stream}:\n");
+        if let Some(diff_command) = self.config.diff_command.as_deref() {
+            let mut args = diff_command.split_whitespace();
+            let name = args.next().unwrap();
+            match Command::new(name).args(args).args([expected_path, actual_path]).output() {
+                Err(err) => {
+                    self.fatal(&format!(
+                        "failed to call custom diff command `{diff_command}`: {err}"
+                    ));
+                }
+                Ok(output) => {
+                    let output = String::from_utf8_lossy(&output.stdout);
+                    eprint!("{output}");
+                }
+            }
+        } else {
+            eprint!("{}", write_diff(expected, actual, 3));
+        }
+
+        // NOTE: argument order is important, we need `actual` to be on the left so the line number match up when we compare it to `actual_unnormalized` below.
+        let diff_results = make_diff(actual, expected, 0);
+
+        let (mut mismatches_normalized, mut mismatch_line_nos) = (String::new(), vec![]);
+        for hunk in diff_results {
+            let mut line_no = hunk.line_number;
+            for line in hunk.lines {
+                // NOTE: `Expected` is actually correct here, the argument order is reversed so our line numbers match up
+                if let DiffLine::Expected(normalized) = line {
+                    mismatches_normalized += &normalized;
+                    mismatches_normalized += "\n";
+                    mismatch_line_nos.push(line_no);
+                    line_no += 1;
+                }
+            }
+        }
+        let mut mismatches_unnormalized = String::new();
+        let diff_normalized = make_diff(actual, actual_unnormalized, 0);
+        for hunk in diff_normalized {
+            if mismatch_line_nos.contains(&hunk.line_number) {
+                for line in hunk.lines {
+                    if let DiffLine::Resulting(unnormalized) = line {
+                        mismatches_unnormalized += &unnormalized;
+                        mismatches_unnormalized += "\n";
+                    }
+                }
+            }
+        }
+
+        let normalized_diff = make_diff(&mismatches_normalized, &mismatches_unnormalized, 0);
+        // HACK: instead of checking if each hunk is empty, this only checks if the whole input is empty. we should be smarter about this so we don't treat added or removed output as normalized.
+        if !normalized_diff.is_empty()
+            && !mismatches_unnormalized.is_empty()
+            && !mismatches_normalized.is_empty()
+        {
+            eprintln!("Note: some mismatched output was normalized before being compared");
+            // FIXME: respect diff_command
+            eprint!("{}", write_diff(&mismatches_unnormalized, &mismatches_normalized, 0));
+        }
     }
 
     fn check_and_prune_duplicate_outputs(
@@ -2707,7 +2783,7 @@ impl<'test> TestCx<'test> {
         fs::create_dir_all(&incremental_dir).unwrap();
 
         if self.config.verbose {
-            println!("init_incremental_test: incremental_dir={}", incremental_dir.display());
+            eprintln!("init_incremental_test: incremental_dir={}", incremental_dir.display());
         }
     }
 
@@ -2765,7 +2841,7 @@ impl ProcRes {
             }
         }
 
-        println!(
+        eprintln!(
             "status: {}\ncommand: {}\n{}\n{}\n",
             self.status,
             self.cmdline,
@@ -2776,7 +2852,7 @@ impl ProcRes {
 
     pub fn fatal(&self, err: Option<&str>, on_failure: impl FnOnce()) -> ! {
         if let Some(e) = err {
-            println!("\nerror: {}", e);
+            eprintln!("\nerror: {}", e);
         }
         self.print_info();
         on_failure();

@@ -34,7 +34,7 @@ use rustc_session::config::{
 };
 use rustc_span::source_map::SourceMap;
 use rustc_span::symbol::sym;
-use rustc_span::{BytePos, FileName, InnerSpan, Pos, Span};
+use rustc_span::{FileName, InnerSpan, Span, SpanData};
 use rustc_target::spec::{MergeFunctions, SanitizerSet};
 use tracing::debug;
 
@@ -1837,7 +1837,7 @@ fn spawn_work<'a, B: ExtraBackendMethods>(
 
 enum SharedEmitterMessage {
     Diagnostic(Diagnostic),
-    InlineAsmError(u32, String, Level, Option<(String, Vec<InnerSpan>)>),
+    InlineAsmError(SpanData, String, Level, Option<(String, Vec<InnerSpan>)>),
     Fatal(String),
 }
 
@@ -1859,12 +1859,12 @@ impl SharedEmitter {
 
     pub fn inline_asm_error(
         &self,
-        cookie: u32,
+        span: SpanData,
         msg: String,
         level: Level,
         source: Option<(String, Vec<InnerSpan>)>,
     ) {
-        drop(self.sender.send(SharedEmitterMessage::InlineAsmError(cookie, msg, level, source)));
+        drop(self.sender.send(SharedEmitterMessage::InlineAsmError(span, msg, level, source)));
     }
 
     fn fatal(&self, msg: &str) {
@@ -1883,7 +1883,11 @@ impl Translate for SharedEmitter {
 }
 
 impl Emitter for SharedEmitter {
-    fn emit_diagnostic(&mut self, mut diag: rustc_errors::DiagInner) {
+    fn emit_diagnostic(
+        &mut self,
+        mut diag: rustc_errors::DiagInner,
+        _registry: &rustc_errors::registry::Registry,
+    ) {
         // Check that we aren't missing anything interesting when converting to
         // the cut-down local `DiagInner`.
         assert_eq!(diag.span, MultiSpan::new());
@@ -1949,17 +1953,12 @@ impl SharedEmitterMain {
                     dcx.emit_diagnostic(d);
                     sess.dcx().abort_if_errors();
                 }
-                Ok(SharedEmitterMessage::InlineAsmError(cookie, msg, level, source)) => {
+                Ok(SharedEmitterMessage::InlineAsmError(span, msg, level, source)) => {
                     assert_matches!(level, Level::Error | Level::Warning | Level::Note);
-                    let msg = msg.strip_prefix("error: ").unwrap_or(&msg).to_string();
                     let mut err = Diag::<()>::new(sess.dcx(), level, msg);
-
-                    // If the cookie is 0 then we don't have span information.
-                    if cookie != 0 {
-                        let pos = BytePos::from_u32(cookie);
-                        let span = Span::with_root_ctxt(pos, pos);
-                        err.span(span);
-                    };
+                    if !span.is_dummy() {
+                        err.span(span.span());
+                    }
 
                     // Point to the generated assembly if it is available.
                     if let Some((buffer, spans)) = source {
@@ -2028,8 +2027,6 @@ pub struct OngoingCodegen<B: ExtraBackendMethods> {
 
 impl<B: ExtraBackendMethods> OngoingCodegen<B> {
     pub fn join(self, sess: &Session) -> (CodegenResults, FxIndexMap<WorkProductId, WorkProduct>) {
-        let _timer = sess.timer("finish_ongoing_codegen");
-
         self.shared_emitter_main.check(sess, true);
         let compiled_modules = sess.time("join_worker_thread", || match self.coordinator.join() {
             Ok(Ok(compiled_modules)) => compiled_modules,
