@@ -327,11 +327,11 @@ pub trait Machine<'tcx>: Sized {
         addr: u64,
     ) -> InterpResult<'tcx, Pointer<Option<Self::Provenance>>>;
 
-    /// Marks a pointer as exposed, allowing it's provenance
+    /// Marks a pointer as exposed, allowing its provenance
     /// to be recovered. "Pointer-to-int cast"
-    fn expose_ptr(
-        ecx: &mut InterpCx<'tcx, Self>,
-        ptr: Pointer<Self::Provenance>,
+    fn expose_provenance(
+        ecx: &InterpCx<'tcx, Self>,
+        provenance: Self::Provenance,
     ) -> InterpResult<'tcx>;
 
     /// Convert a pointer with provenance into an allocation-offset pair and extra provenance info.
@@ -540,10 +540,14 @@ pub trait Machine<'tcx>: Sized {
         interp_ok(ReturnAction::Normal)
     }
 
-    /// Called immediately after an "immediate" local variable is read
+    /// Called immediately after an "immediate" local variable is read in a given frame
     /// (i.e., this is called for reads that do not end up accessing addressable memory).
     #[inline(always)]
-    fn after_local_read(_ecx: &InterpCx<'tcx, Self>, _local: mir::Local) -> InterpResult<'tcx> {
+    fn after_local_read(
+        _ecx: &InterpCx<'tcx, Self>,
+        _frame: &Frame<'tcx, Self::Provenance, Self::FrameExtra>,
+        _local: mir::Local,
+    ) -> InterpResult<'tcx> {
         interp_ok(())
     }
 

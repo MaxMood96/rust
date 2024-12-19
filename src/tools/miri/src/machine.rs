@@ -11,7 +11,7 @@ use std::{fmt, process};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rustc_abi::{Align, ExternAbi, Size};
-use rustc_attr::InlineAttr;
+use rustc_attr_parsing::InlineAttr;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 #[allow(unused)]
 use rustc_data_structures::static_assert_size;
@@ -269,6 +269,9 @@ impl fmt::Debug for Provenance {
 impl interpret::Provenance for Provenance {
     /// We use absolute addresses in the `offset` of a `StrictPointer`.
     const OFFSET_IS_ADDR: bool = true;
+
+    /// Miri implements wildcard provenance.
+    const WILDCARD: Option<Self> = Some(Provenance::Wildcard);
 
     fn get_alloc_id(self) -> Option<AllocId> {
         match self {
@@ -1242,8 +1245,11 @@ impl<'tcx> Machine<'tcx> for MiriMachine<'tcx> {
     /// Called on `ptr as usize` casts.
     /// (Actually computing the resulting `usize` doesn't need machine help,
     /// that's just `Scalar::try_to_int`.)
-    fn expose_ptr(ecx: &mut InterpCx<'tcx, Self>, ptr: StrictPointer) -> InterpResult<'tcx> {
-        match ptr.provenance {
+    fn expose_provenance(
+        ecx: &InterpCx<'tcx, Self>,
+        provenance: Self::Provenance,
+    ) -> InterpResult<'tcx> {
+        match provenance {
             Provenance::Concrete { alloc_id, tag } => ecx.expose_ptr(alloc_id, tag),
             Provenance::Wildcard => {
                 // No need to do anything for wildcard pointers as
@@ -1565,8 +1571,12 @@ impl<'tcx> Machine<'tcx> for MiriMachine<'tcx> {
         res
     }
 
-    fn after_local_read(ecx: &InterpCx<'tcx, Self>, local: mir::Local) -> InterpResult<'tcx> {
-        if let Some(data_race) = &ecx.frame().extra.data_race {
+    fn after_local_read(
+        ecx: &InterpCx<'tcx, Self>,
+        frame: &Frame<'tcx, Provenance, FrameExtra<'tcx>>,
+        local: mir::Local,
+    ) -> InterpResult<'tcx> {
+        if let Some(data_race) = &frame.extra.data_race {
             data_race.local_read(local, &ecx.machine);
         }
         interp_ok(())
