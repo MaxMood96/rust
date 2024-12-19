@@ -9,8 +9,7 @@ use rustc_ast::{
     Path, PathSegment, QSelf,
 };
 use rustc_errors::{Applicability, Diag, PResult};
-use rustc_span::symbol::{Ident, kw, sym};
-use rustc_span::{BytePos, Span};
+use rustc_span::{BytePos, Ident, Span, kw, sym};
 use thin_vec::ThinVec;
 use tracing::debug;
 
@@ -469,7 +468,7 @@ impl<'a> Parser<'a> {
             PathStyle::Pat
                 if let Ok(_) = self
                     .parse_paren_comma_seq(|p| {
-                        p.parse_pat_allow_top_alt(
+                        p.parse_pat_allow_top_guard(
                             None,
                             RecoverComma::No,
                             RecoverColon::No,

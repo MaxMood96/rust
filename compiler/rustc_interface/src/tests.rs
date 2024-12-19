@@ -23,8 +23,7 @@ use rustc_session::utils::{CanonicalizedPath, NativeLib, NativeLibKind};
 use rustc_session::{CompilerIO, EarlyDiagCtxt, Session, build_session, filesearch, getopts};
 use rustc_span::edition::{DEFAULT_EDITION, Edition};
 use rustc_span::source_map::{RealFileLoader, SourceMapInputs};
-use rustc_span::symbol::sym;
-use rustc_span::{FileName, SourceFileHashAlgorithm};
+use rustc_span::{FileName, SourceFileHashAlgorithm, sym};
 use rustc_target::spec::{
     CodeModel, FramePointer, LinkerFlavorCli, MergeFunctions, OnBrokenPipe, PanicStrategy,
     RelocModel, RelroLevel, SanitizerSet, SplitDebuginfo, StackProtector, TlsModel, WasmCAbi,
@@ -832,6 +831,7 @@ fn test_unstable_options_tracking_hash() {
     tracked!(precise_enum_drop_elaboration, false);
     tracked!(profile_sample_use, Some(PathBuf::from("abc")));
     tracked!(profiler_runtime, "abc".to_string());
+    tracked!(reg_struct_return, true);
     tracked!(regparm, Some(3));
     tracked!(relax_elf_relocations, Some(true));
     tracked!(remap_cwd_prefix, Some(PathBuf::from("abc")));

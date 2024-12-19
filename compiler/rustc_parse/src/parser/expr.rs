@@ -8,6 +8,7 @@ use ast::token::IdentIsRaw;
 use ast::{CoroutineKind, ForLoopKind, GenBlockKind, MatchKind, Pat, Path, PathSegment, Recovered};
 use rustc_ast::ptr::P;
 use rustc_ast::token::{self, Delimiter, Token, TokenKind};
+use rustc_ast::tokenstream::TokenTree;
 use rustc_ast::util::case::Case;
 use rustc_ast::util::classify;
 use rustc_ast::util::parser::{AssocOp, ExprPrecedence, Fixity, prec_let_scrutinee_needs_par};
@@ -15,7 +16,7 @@ use rustc_ast::visit::{Visitor, walk_expr};
 use rustc_ast::{
     self as ast, AnonConst, Arm, AttrStyle, AttrVec, BinOp, BinOpKind, BlockCheckMode, CaptureBy,
     ClosureBinder, DUMMY_NODE_ID, Expr, ExprField, ExprKind, FnDecl, FnRetTy, Label, MacCall,
-    MetaItemLit, Movability, Param, RangeLimits, StmtKind, Ty, TyKind, UnOp,
+    MetaItemLit, Movability, Param, RangeLimits, StmtKind, Ty, TyKind, UnOp, UnsafeBinderCastKind,
 };
 use rustc_ast_pretty::pprust;
 use rustc_data_structures::stack::ensure_sufficient_stack;
@@ -26,8 +27,7 @@ use rustc_session::errors::{ExprParenthesesNeeded, report_lit_error};
 use rustc_session::lint::BuiltinLintDiag;
 use rustc_session::lint::builtin::BREAK_WITH_LABEL_AND_LOOP;
 use rustc_span::source_map::{self, Spanned};
-use rustc_span::symbol::{Ident, Symbol, kw, sym};
-use rustc_span::{BytePos, ErrorGuaranteed, Pos, Span};
+use rustc_span::{BytePos, ErrorGuaranteed, Ident, Pos, Span, Symbol, kw, sym};
 use thin_vec::{ThinVec, thin_vec};
 use tracing::instrument;
 
@@ -1369,11 +1369,14 @@ impl<'a> Parser<'a> {
             ))
         } else {
             // Field access `expr.f`
+            let span = lo.to(self.prev_token.span);
             if let Some(args) = seg.args {
-                self.dcx().emit_err(errors::FieldExpressionWithGeneric(args.span()));
+                // See `StashKey::GenericInFieldExpr` for more info on why we stash this.
+                self.dcx()
+                    .create_err(errors::FieldExpressionWithGeneric(args.span()))
+                    .stash(seg.ident.span, StashKey::GenericInFieldExpr);
             }
 
-            let span = lo.to(self.prev_token.span);
             Ok(self.mk_expr(span, ExprKind::Field(self_arg, seg.ident)))
         }
     }
@@ -1928,6 +1931,12 @@ impl<'a> Parser<'a> {
             Ok(match ident.name {
                 sym::offset_of => Some(this.parse_expr_offset_of(lo)?),
                 sym::type_ascribe => Some(this.parse_expr_type_ascribe(lo)?),
+                sym::wrap_binder => {
+                    Some(this.parse_expr_unsafe_binder_cast(lo, UnsafeBinderCastKind::Wrap)?)
+                }
+                sym::unwrap_binder => {
+                    Some(this.parse_expr_unsafe_binder_cast(lo, UnsafeBinderCastKind::Unwrap)?)
+                }
                 _ => None,
             })
         })
@@ -2001,6 +2010,17 @@ impl<'a> Parser<'a> {
         let ty = self.parse_ty()?;
         let span = lo.to(self.token.span);
         Ok(self.mk_expr(span, ExprKind::Type(expr, ty)))
+    }
+
+    pub(crate) fn parse_expr_unsafe_binder_cast(
+        &mut self,
+        lo: Span,
+        kind: UnsafeBinderCastKind,
+    ) -> PResult<'a, P<Expr>> {
+        let expr = self.parse_expr()?;
+        let ty = if self.eat(&TokenKind::Comma) { Some(self.parse_ty()?) } else { None };
+        let span = lo.to(self.token.span);
+        Ok(self.mk_expr(span, ExprKind::UnsafeBinderCast(kind, expr, ty)))
     }
 
     /// Returns a string literal if the next token is a string literal.
@@ -2363,10 +2383,7 @@ impl<'a> Parser<'a> {
         };
 
         match coroutine_kind {
-            Some(CoroutineKind::Async { span, .. }) => {
-                // Feature-gate `async ||` closures.
-                self.psess.gated_spans.gate(sym::async_closure, span);
-            }
+            Some(CoroutineKind::Async { .. }) => {}
             Some(CoroutineKind::Gen { span, .. }) | Some(CoroutineKind::AsyncGen { span, .. }) => {
                 // Feature-gate `gen ||` and `async gen ||` closures.
                 // FIXME(gen_blocks): This perhaps should be a different gate.
@@ -2376,7 +2393,8 @@ impl<'a> Parser<'a> {
         }
 
         if self.token == TokenKind::Semi
-            && matches!(self.token_cursor.stack.last(), Some((.., Delimiter::Parenthesis)))
+            && let Some(last) = self.token_cursor.stack.last()
+            && let Some(TokenTree::Delimited(_, _, Delimiter::Parenthesis, _)) = last.curr()
             && self.may_recover()
         {
             // It is likely that the closure body is a block but where the
@@ -2631,7 +2649,7 @@ impl<'a> Parser<'a> {
         };
         self.bump(); // Eat `let` token
         let lo = self.prev_token.span;
-        let pat = self.parse_pat_allow_top_alt(
+        let pat = self.parse_pat_no_top_guard(
             None,
             RecoverComma::Yes,
             RecoverColon::Yes,
@@ -2778,7 +2796,7 @@ impl<'a> Parser<'a> {
         };
         // Try to parse the pattern `for ($PAT) in $EXPR`.
         let pat = match (
-            self.parse_pat_allow_top_alt(
+            self.parse_pat_allow_top_guard(
                 None,
                 RecoverComma::Yes,
                 RecoverColon::Yes,
@@ -3241,7 +3259,7 @@ impl<'a> Parser<'a> {
                     // then we should recover.
                     let mut snapshot = this.create_snapshot_for_diagnostic();
                     let pattern_follows = snapshot
-                        .parse_pat_allow_top_alt(
+                        .parse_pat_no_top_guard(
                             None,
                             RecoverComma::Yes,
                             RecoverColon::Yes,
@@ -3315,43 +3333,37 @@ impl<'a> Parser<'a> {
 
     fn parse_match_arm_pat_and_guard(&mut self) -> PResult<'a, (P<Pat>, Option<P<Expr>>)> {
         if self.token == token::OpenDelim(Delimiter::Parenthesis) {
-            // Detect and recover from `($pat if $cond) => $arm`.
             let left = self.token.span;
-            match self.parse_pat_allow_top_alt(
+            let pat = self.parse_pat_no_top_guard(
                 None,
                 RecoverComma::Yes,
                 RecoverColon::Yes,
                 CommaRecoveryMode::EitherTupleOrPipe,
-            ) {
-                Ok(pat) => Ok((pat, self.parse_match_arm_guard()?)),
-                Err(err)
-                    if let prev_sp = self.prev_token.span
-                        && let true = self.eat_keyword(kw::If) =>
-                {
-                    // We know for certain we've found `($pat if` so far.
-                    let mut cond = match self.parse_match_guard_condition() {
-                        Ok(cond) => cond,
-                        Err(cond_err) => {
-                            cond_err.cancel();
-                            return Err(err);
-                        }
-                    };
-                    err.cancel();
-                    CondChecker::new(self).visit_expr(&mut cond);
-                    self.eat_to_tokens(&[&token::CloseDelim(Delimiter::Parenthesis)]);
-                    self.expect(&token::CloseDelim(Delimiter::Parenthesis))?;
-                    let right = self.prev_token.span;
-                    self.dcx().emit_err(errors::ParenthesesInMatchPat {
-                        span: vec![left, right],
-                        sugg: errors::ParenthesesInMatchPatSugg { left, right },
-                    });
-                    Ok((self.mk_pat(left.to(prev_sp), ast::PatKind::Wild), Some(cond)))
-                }
-                Err(err) => Err(err),
+            )?;
+            if let ast::PatKind::Paren(subpat) = &pat.kind
+                && let ast::PatKind::Guard(..) = &subpat.kind
+            {
+                // Detect and recover from `($pat if $cond) => $arm`.
+                // FIXME(guard_patterns): convert this to a normal guard instead
+                let span = pat.span;
+                let ast::PatKind::Paren(subpat) = pat.into_inner().kind else { unreachable!() };
+                let ast::PatKind::Guard(_, mut cond) = subpat.into_inner().kind else {
+                    unreachable!()
+                };
+                self.psess.gated_spans.ungate_last(sym::guard_patterns, cond.span);
+                CondChecker::new(self).visit_expr(&mut cond);
+                let right = self.prev_token.span;
+                self.dcx().emit_err(errors::ParenthesesInMatchPat {
+                    span: vec![left, right],
+                    sugg: errors::ParenthesesInMatchPatSugg { left, right },
+                });
+                Ok((self.mk_pat(span, ast::PatKind::Wild), Some(cond)))
+            } else {
+                Ok((pat, self.parse_match_arm_guard()?))
             }
         } else {
             // Regular parser flow:
-            let pat = self.parse_pat_allow_top_alt(
+            let pat = self.parse_pat_no_top_guard(
                 None,
                 RecoverComma::Yes,
                 RecoverColon::Yes,
@@ -3539,7 +3551,7 @@ impl<'a> Parser<'a> {
                 let exp_span = self.prev_token.span;
                 // We permit `.. }` on the left-hand side of a destructuring assignment.
                 if self.check(&token::CloseDelim(close_delim)) {
-                    base = ast::StructRest::Rest(self.prev_token.span.shrink_to_hi());
+                    base = ast::StructRest::Rest(self.prev_token.span);
                     break;
                 }
                 match self.parse_expr() {
@@ -4022,7 +4034,9 @@ impl MutVisitor for CondChecker<'_> {
                 mut_visit::walk_expr(self, e);
                 self.forbid_let_reason = forbid_let_reason;
             }
-            ExprKind::Cast(ref mut op, _) | ExprKind::Type(ref mut op, _) => {
+            ExprKind::Cast(ref mut op, _)
+            | ExprKind::Type(ref mut op, _)
+            | ExprKind::UnsafeBinderCast(_, ref mut op, _) => {
                 let forbid_let_reason = self.forbid_let_reason;
                 self.forbid_let_reason = Some(OtherForbidden);
                 self.visit_expr(op);
